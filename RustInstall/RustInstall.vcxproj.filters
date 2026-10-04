@@ -43,6 +43,18 @@
     <ClCompile Include="providers/dotnet/dotnet_provider.cpp">
       <Filter>providers\dotnet</Filter>
     </ClCompile>
+    <ClCompile Include="providers/zig/zig_provider.cpp">
+      <Filter>providers\zig</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/php/php_provider.cpp">
+      <Filter>providers\php</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/ruby/ruby_provider.cpp">
+      <Filter>providers\ruby</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/git/git_provider.cpp">
+      <Filter>providers\git</Filter>
+    </ClCompile>
     <ClInclude Include="providers/provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
@@ -76,6 +88,21 @@
     <ClInclude Include="providers/dotnet/dotnet_provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
+    <ClInclude Include="providers/gh_releases.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/zig/zig_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/php/php_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/ruby/ruby_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/git/git_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
     <Filter Include="providers">
       <UniqueIdentifier>{a1000001-0000-4000-8000-000000000001}</UniqueIdentifier>
     </Filter>
@@ -90,6 +117,18 @@
     </Filter>
     <Filter Include="providers\dotnet">
       <UniqueIdentifier>{a1000001-0000-4000-8000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\zig">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000007}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\php">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000008}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\ruby">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000009}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\git">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-00000000000a}</UniqueIdentifier>
     </Filter>
     <Filter Include="providers\headers">
       <UniqueIdentifier>{a1000001-0000-4000-8000-000000000006}</UniqueIdentifier>

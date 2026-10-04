@@ -437,6 +437,76 @@ inline fs::path find_in_path(const std::wstring& exe_name) {
     return {};
 }
 
+// 体检用户 PATH：移除指向不存在目录的条目（先展开环境变量再判断存在性）
+// total 为原始非空条目数；返回移除数量（0 = 无失效项，不动注册表）
+inline int fix_user_path(int& total, std::string& err) {
+    total = 0;
+    HKEY key = nullptr;
+    LONG rc = RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_QUERY_VALUE, &key);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 HKCU\\Environment 失败（错误码 " + std::to_string(rc) + "）";
+        return -1;
+    }
+    std::wstring cur;
+    DWORD type = 0, size = 0;
+    rc = RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size);
+    if (rc == ERROR_SUCCESS && size > 0) {
+        cur.resize(size / 2);
+        RegQueryValueExW(key, L"Path", nullptr, &type, (BYTE*)cur.data(), &size);
+        while (!cur.empty() && cur.back() == L'\0') cur.pop_back();
+    }
+    RegCloseKey(key);
+
+    std::vector<std::wstring> keep;
+    int removed = 0;
+    size_t pos = 0;
+    while (pos <= cur.size()) {
+        size_t next = cur.find(L';', pos);
+        std::wstring item = su::trim(
+            cur.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+        if (!item.empty()) {
+            ++total;
+            wchar_t buf[1024] = {};
+            ExpandEnvironmentStringsW(item.c_str(), buf, 1024);
+            std::error_code ec;
+            if (fs::is_directory(fs::path(buf), ec))
+                keep.push_back(item);
+            else
+                ++removed;
+        }
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    if (removed == 0) return 0;
+
+    std::wstring joined;
+    for (size_t i = 0; i < keep.size(); ++i) {
+        if (i) joined += L";";
+        joined += keep[i];
+    }
+    key = nullptr;
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_SET_VALUE, &key);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 HKCU\\Environment 失败（错误码 " + std::to_string(rc) + "）";
+        return -1;
+    }
+    if (joined.empty())
+        RegDeleteValueW(key, L"Path");
+    else
+        rc = RegSetValueExW(key, L"Path", 0, REG_EXPAND_SZ, (const BYTE*)joined.c_str(),
+                            (DWORD)((joined.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS && !joined.empty()) {
+        err = "写回用户 PATH 失败（错误码 " + std::to_string(rc) + "）";
+        return -1;
+    }
+    DWORD_PTR resp = 0;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment",
+                        SMTO_ABORTIFHUNG, 3000, &resp);
+    logx::linef("PATH 体检：清理失效目录 %d 项", removed);
+    return removed;
+}
+
 // 递归移动/合并目录内容
 inline bool move_tree(const fs::path& src, const fs::path& dst_parent, std::string& err) {
     fs::path dst = dst_parent / src.filename();

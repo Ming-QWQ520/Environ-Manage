@@ -15,6 +15,24 @@ namespace archive {
 
 namespace fs = std::filesystem;
 
+// 将临时目录内容合并到版本目录（自动识别“单顶层目录”与“扁平”结构）
+inline bool merge_tmp_to_ver_dir(const fs::path& tmp, const fs::path& ver_dir, std::string& err) {
+    std::error_code ec;
+    fs::create_directories(ver_dir, ec);
+    std::vector<fs::path> entries;
+    for (const fs::directory_entry& e : fs::directory_iterator(tmp)) entries.push_back(e.path());
+    if (entries.size() == 1 && fs::is_directory(entries[0])) {
+        // 单顶层目录 → 合并其内容到版本目录
+        for (const fs::directory_entry& e : fs::directory_iterator(entries[0]))
+            if (!platform::move_tree(e.path(), ver_dir, err)) return false;
+    } else {
+        // 扁平结构 → 全部上移
+        for (const fs::path& e : entries)
+            if (!platform::move_tree(e, ver_dir, err)) return false;
+    }
+    return true;
+}
+
 // 解压压缩包到版本目录：自动识别“单顶层目录”（node-vX/、jdk-*/、go/）与“扁平”（.NET SDK）
 inline bool extract_to_ver_dir(const fs::path& archive_file, const fs::path& ver_dir,
                                std::string& err) {
@@ -36,23 +54,9 @@ inline bool extract_to_ver_dir(const fs::path& archive_file, const fs::path& ver
         fs::remove_all(tmp, ec);
         return false;
     }
-    fs::create_directories(ver_dir, ec);
-    std::vector<fs::path> entries;
-    for (const fs::directory_entry& e : fs::directory_iterator(tmp)) entries.push_back(e.path());
-    if (entries.size() == 1 && fs::is_directory(entries[0])) {
-        // 单顶层目录 → 合并其内容到版本目录
-        for (const fs::directory_entry& e : fs::directory_iterator(entries[0]))
-            if (!platform::move_tree(e.path(), ver_dir, err)) {
-                fs::remove_all(tmp, ec);
-                return false;
-            }
-    } else {
-        // 扁平结构 → 全部上移
-        for (const fs::path& e : entries)
-            if (!platform::move_tree(e, ver_dir, err)) {
-                fs::remove_all(tmp, ec);
-                return false;
-            }
+    if (!merge_tmp_to_ver_dir(tmp, ver_dir, err)) {
+        fs::remove_all(tmp, ec);
+        return false;
     }
     fs::remove_all(tmp, ec);
     logx::linef("已解压到版本目录: %s", su::wide_to_utf8(ver_dir.wstring()).c_str());

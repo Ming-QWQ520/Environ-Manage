@@ -89,6 +89,9 @@ std::vector<std::pair<std::string, fs::path>> managed_installs(Provider& p);
 bool uninstall_version(Provider& p, const fs::path& root, const std::string& version,
                        std::string& err);
 
+// 版本名自然比较（数字段按数值比较）：支持 "3.12.6" / "v22.14.0" / "0.13.0" / "3.3.5-1"
+int natural_cmp(const std::string& a, const std::string& b);
+
 // 支持级别 → 终端颜色（FTXUI 之外的批处理输出也使用）
 inline const char* support_ansi(SupportLevel l) {
     switch (l) {

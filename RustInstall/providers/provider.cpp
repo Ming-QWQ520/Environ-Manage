@@ -163,4 +163,28 @@ bool uninstall_version(Provider& p, const fs::path& root, const std::string& ver
     return true;
 }
 
+// 版本名自然比较（数字段按数值比较）：供各 Provider 排序版本列表使用
+int natural_cmp(const std::string& a, const std::string& b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (isdigit((unsigned char)a[i]) && isdigit((unsigned char)b[j])) {
+            size_t i2 = i, j2 = j;
+            while (i2 < a.size() && isdigit((unsigned char)a[i2])) ++i2;
+            while (j2 < b.size() && isdigit((unsigned char)b[j2])) ++j2;
+            long long va = atoll(a.substr(i, i2 - i).c_str());
+            long long vb = atoll(b.substr(j, j2 - j).c_str());
+            if (va != vb) return va < vb ? -1 : 1;
+            i = i2;
+            j = j2;
+        } else {
+            if (a[i] != b[j]) return (unsigned char)a[i] < (unsigned char)b[j] ? -1 : 1;
+            ++i;
+            ++j;
+        }
+    }
+    if (i < a.size()) return 1;
+    if (j < b.size()) return -1;
+    return 0;
+}
+
 } // namespace prov
