@@ -1,6 +1,6 @@
 # Environ Manage（环境管理器）
 
-> By: Ming-QWQ520(明)
+> By: Ming-QWQ520(明) · 开源协议: [AGPL-3.0](LICENSE)
 
 一个纯命令行的 **Windows 开发环境下载管理工具**（C++20，TUI 基于 [FTXUI](https://github.com/ArthurSonzogni/FTXUI)（已内置于 `RustInstall/third_party/ftxui`，MIT），网络层为 WinHTTP，**无其他第三方依赖**）。
 支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET** 六种环境的完整下载、校验、安装与多版本管理。
@@ -280,3 +280,31 @@ SDK 侧的统一安装流程（`providers/provider.cpp` 的 `install_to_root`）
 - **.NET 校验**：官方不提供发布校验和，完整性由下载字节数与 `Content-Length` 比对保证。
 - **测试钩子**：设置环境变量 `RUSTINSTALL_TEST_KEYS="119 115 13"`（`_getch` 按键码序列，
   空格分隔）可脚本化驱动交互菜单。
+
+---
+
+## 开源协议
+
+本项目采用 **GNU Affero General Public License v3.0（AGPL-3.0）**，协议全文见 [LICENSE](LICENSE)。
+
+```
+Copyright (C) 2026 Ming-QWQ520(明)
+
+本程序是自由软件：你可以遵照 GNU Affero 通用公共许可证（第 3 版，或你选择的任何更新版本）
+的条款重新发布和/或修改它。
+
+本程序的发布是希望它有用，但不提供任何担保，甚至不包含适销性或特定用途适用性的默示担保。
+详见 GNU Affero 通用公共许可证。
+
+你应该已经随本程序收到了许可证副本；如果没有，请见 <https://www.gnu.org/licenses/>。
+```
+
+AGPL-3.0 是强著佐权（copyleft）协议。与 GPL 的关键区别在于第 13 条：**若你修改本程序并
+通过网络向用户提供服务，必须向这些用户提供对应的完整源代码。**
+
+### 第三方组件
+
+`RustInstall/third_party/ftxui` 为 [FTXUI](https://github.com/ArthurSonzogni/FTXUI) v7.0.3 的上游源码，
+版权归原作者 Arthur Sonzogni 所有，**继续适用其自身的 MIT 协议**
+（见 `RustInstall/third_party/ftxui/LICENSE`），不受本项目 AGPL-3.0 覆盖。
+MIT 与 AGPL-3.0 兼容，二者可一并分发。
