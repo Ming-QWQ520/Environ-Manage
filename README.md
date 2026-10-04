@@ -92,8 +92,11 @@ SDK 管理（多版本 + current junction）:
       --sdk <id>           node / jdk / go / dotnet
       --sdk-list           仅列出该 SDK 的版本后退出
       --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）
-      --with-pnpm          node 安装后启用 pnpm（Corepack）并配置存储位置
-      --pnpm-home <目录>   pnpm/npm 存储基础目录（默认 <目录>\pnpm-repository）
+      Node.js 工具链（优先级: npm/npx 随装自带 → Corepack 开关 → pnpm/yarn）:
+      --with-pnpm          node 安装后经 Corepack 全局安装 pnpm（默认全局启用）
+      --with-yarn          node 安装后经 Corepack 全局安装 yarn
+      --corepack <开关>    enable（默认，启用 Corepack 管理 pnpm/yarn）/ disable
+      --pnpm-home <目录>   pnpm/npm 存储根目录（默认 <目录>\pnpm-repository）
       布局: <目录>\versions\<sdk>\<版本>，<目录>\<sdk>\current 指向当前版本
 ```
 
@@ -120,6 +123,12 @@ RustInstall.exe --python -p D:\Python313 --py-version 3.13.0 --py-install
 
 :: 安装 Node.js 最新版（含 current/PATH，并启用 pnpm）
 RustInstall.exe --sdk node -p D:\Sdk --with-pnpm
+
+:: 彻底规范 pnpm/npm 存储（四个 pnpm 目录 + npm prefix/cache 一次配置并回读校验）
+RustInstall.exe --sdk node -p D:\Sdk --with-pnpm --pnpm-home D:\pnpm-repository
+
+:: Corepack 启用/禁用开关（管理 pnpm/yarn；禁用即移除 shim）
+RustInstall.exe --sdk node -p D:\Sdk --corepack disable
 
 :: Temurin JDK 21（自动选 21 线最新 ga）
 RustInstall.exe --sdk jdk -p D:\Sdk --sdk-version 21
@@ -203,9 +212,27 @@ TUI 选择目标或 `--sdk <id>` 进入，四个 SDK 走统一的 Provider 接�
   .NET 无校验和，由下载字节数与 `Content-Length` 比对保证
 - **镜像**：Node 走 npmmirror、Go 走阿里云/国内官方、JDK 的 GitHub 直链走 gh-proxy 加速，
   失败自动回退官方源
-- **Node 工具链（`--with-pnpm`）**：安装后经 Corepack 启用 pnpm（不单独下载二进制），
-  并规范化 pnpm 的 `global-dir` / `global-bin-dir` / `state-dir` / `cache-dir` 与 npm 的
-  `prefix` / `cache` 到 `<目录>\pnpm-repository`
+- **Node 工具链（`--sdk node`）**：按优先级模型统一管理，安装完成后自动检测并显示各工具版本：
+  1. **npm / npx**：随 Node.js 安装自动附带，不做任何安装动作，只检测并显示版本；
+  2. **Corepack**：Node 内置，提供“启用/禁用”开关（`--corepack enable|disable`、TUI 确认页 `C` 键），
+     用来统一管理 Yarn / pnpm；选装 pnpm/yarn 时自动启用；
+  3. **Yarn / pnpm**：常用包管理器，推荐经 Corepack 管理版本（`corepack prepare <工具>@latest
+     --activate`，全局可用），本工具不单独下载其二进制。TUI 确认页 `N` 键安装 pnpm（默认勾选）、
+     `Y` 键安装 yarn。
+- **存储位置规范化（`--pnpm-home <目录>`，默认 `<安装目录>\pnpm-repository`）**：彻底规范 pnpm
+  的全局包、二进制文件与状态目录，npm 同步规范，全部写入后逐项回读校验：
+
+  ```bat
+  pnpm config set global-dir      D:\pnpm-repository\global      :: 全局包目录
+  pnpm config set global-bin-dir  D:\pnpm-repository\bin         :: 全局命令（二进制）目录
+  pnpm config set state-dir       D:\pnpm-repository\state       :: 状态目录
+  pnpm config set cache-dir       D:\pnpm-repository\cache       :: 下载缓存目录
+  npm   config set prefix         D:\pnpm-repository\npm-global  :: 全局包目录
+  npm   config set cache          D:\pnpm-repository\npm-cache   :: 下载缓存目录
+  ```
+
+  两个全局目录（`bin` 与 `npm-global`）会自动追加进用户 PATH。TUI 模式下亦可在确认页
+  直接输入自定义存储根目录（留空使用默认值）。
 
 ---
 
@@ -259,7 +286,7 @@ SDK 侧的统一安装流程（`providers/provider.cpp` 的 `install_to_root`）
 | `RustInstall/providers/registry.hpp` | Provider 注册表（工厂） |
 | `RustInstall/providers/provider.cpp` | 公共安装流程 `install_to_root`（下载→校验→解压→junction→环境变量→验证） |
 | `RustInstall/providers/checksum.hpp` · `archive.hpp` · `http_client.hpp` | SDK 侧校验 / 解压 / 下载公共件 |
-| `RustInstall/providers/node_tools.hpp` | Node 工具链（npm/pnpm/yarn via Corepack）与存储位置规范化 |
+| `RustInstall/providers/node_tools.hpp` | Node 工具链：npm/npx 检测显示、Corepack 启/禁开关、pnpm/yarn 经 Corepack 安装与存储位置规范化（含回读校验） |
 | `RustInstall/providers/{node,jdk,go,dotnet}/*` | 四个 SDK 的 Provider 实现（版本枚举、工件解析、镜像、校验、解压布局） |
 | `RustInstall/RustInstall.vcxproj` · `.filters` | MSVC 工程与筛选器（直接编译内置 FTXUI） |
 | `RustInstall/third_party/ftxui` | FTXUI v7.0.3 源码（MIT，随项目一起编译） |

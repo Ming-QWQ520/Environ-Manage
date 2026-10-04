@@ -86,10 +86,19 @@ static void print_usage() {
         "      --sdk <id>          node / jdk / go / dotnet\n"
         "      --sdk-list          仅列出该 SDK 的版本后退出\n"
         "      --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）\n"
-        "      --with-pnpm        node 安装后启用 pnpm（Corepack）并配置存储位置\n"
-        "      --pnpm-home <目录> pnpm/npm 存储基础目录（默认 <目录>\\pnpm-repository）\n"
         "      布局: <目录>\\versions\\<sdk>\\<版本>，<目录>\\<sdk>\\current 指向当前版\n"
         "      本\n"
+        "\n"
+        "Node.js 工具链（--sdk node，优先级: npm/npx 随装自带 → Corepack 开关 →\n"
+        "pnpm/yarn 经 Corepack 管理，不单独下载二进制）:\n"
+        "      --with-pnpm         安装后经 Corepack 全局安装 pnpm（默认全局启用）\n"
+        "      --with-yarn         安装后经 Corepack 全局安装 yarn\n"
+        "      --corepack <开关>   enable（默认，启用 Corepack 管理 pnpm/yarn）/\n"
+        "                          disable（禁用，移除 pnpm/yarn shim）\n"
+        "      --pnpm-home <目录>  pnpm/npm 存储根目录（默认 <目录>\\pnpm-repository）\n"
+        "                          pnpm: global-dir/global-bin-dir/state-dir/cache-dir\n"
+        "                                → <根目录>\\global|bin|state|cache\n"
+        "                          npm : prefix/cache → <根目录>\\npm-global|npm-cache\n"
         "\n"
         "示例:\n"
         "  RustInstall.exe                            TUI 交互模式\n"
@@ -97,6 +106,8 @@ static void print_usage() {
         "  RustInstall.exe -p D:\\Rust -v 1.85.0 -t x86_64-pc-windows-gnu -m ustc\n"
         "  RustInstall.exe --python -p D:\\Python -py-version 3.13.0 -m huawei --py-install\n"
         "  RustInstall.exe --sdk node -p D:\\Sdk                       Node.js LTS/Current\n"
+        "  RustInstall.exe --sdk node -p D:\\Sdk --with-pnpm --pnpm-home D:\\pnpm-repository\n"
+        "                                             Node.js + pnpm（存储规范化到指定目录）\n"
         "  RustInstall.exe --sdk jdk  -p D:\\Sdk --sdk-version 21      Temurin JDK 21\n");
 }
 
@@ -128,8 +139,12 @@ struct Options {
     std::string sdk;                   // node | jdk | go | dotnet
     bool sdk_list = false;
     std::string sdk_version;           // "" = 最新
-    bool with_pnpm = false;            // node 安装后配置 pnpm（Corepack）与存储位置
-    std::string pnpm_home;             // pnpm/npm 存储基础目录（默认 <root>\pnpm-repository）
+    // Node.js 工具链：优先级 npm/npx（随装自带，仅检测显示）→ Corepack（内置，启/禁开关）
+    // → pnpm/yarn（经 Corepack 管理，不单独下载二进制）
+    bool with_pnpm = false;            // node 安装后经 Corepack 全局安装 pnpm
+    bool with_yarn = false;            // node 安装后经 Corepack 全局安装 yarn
+    std::string corepack_mode;         // "" / enable（默认）| disable
+    std::string pnpm_home;             // pnpm/npm 存储根目录（默认 <root>\pnpm-repository）
 };
 
 static bool valid_triple(const std::string& t) {
@@ -245,6 +260,17 @@ static Options parse_args(int argc, wchar_t** argv, bool& ok) {
             o.sdk_version = su::wide_to_utf8(v);
         } else if (a == "--with-pnpm") {
             o.with_pnpm = true;
+        } else if (a == "--with-yarn") {
+            o.with_yarn = true;
+        } else if (a == "--corepack") {
+            wchar_t* v = need_value(i, a.c_str());
+            if (!v) return o;
+            o.corepack_mode = su::lower(su::wide_to_utf8(v));
+            if (o.corepack_mode != "enable" && o.corepack_mode != "disable") {
+                printf("--corepack 仅支持 enable/disable\n");
+                ok = false;
+                return o;
+            }
         } else if (a == "--pnpm-home") {
             wchar_t* v = need_value(i, a.c_str());
             if (!v) return o;
@@ -1018,6 +1044,63 @@ static int run_py_batch(const Options& opts) {
 
 // --------------------------------------------------------------- SDK 管理
 
+// Node.js 工具链配置（安装后统一入口，批处理与 TUI 共用）。
+// 按优先级模型执行：
+//   1. npm/npx：随装自带，不做任何动作，仅在末尾的检测报告中显示版本；
+//   2. Corepack：Node 内置，按开关执行 enable/disable（选装 pnpm/yarn 时强制启用）；
+//   3. pnpm/yarn：经 Corepack 安装激活（不单独下载二进制），并规范化存储位置
+//      （pnpm global-dir/global-bin-dir/state-dir/cache-dir + npm prefix/cache）。
+// 返回报告行（供完成汇总/完成页展示）；失败项写入报告并记日志，不中断安装结果。
+static std::vector<std::string> setup_node_toolchain(const fs::path& node_dir,
+                                                     bool corepack_on, bool want_pnpm,
+                                                     bool want_yarn,
+                                                     const fs::path& storage_base,
+                                                     bool add_path,
+                                                     std::string& tools_line) {
+    std::vector<std::string> report;
+    std::string err;
+    // 2) Corepack 开关：选装 pnpm/yarn 时强制启用（二者经 Corepack 管理）
+    bool force_on = corepack_on || want_pnpm || want_yarn;
+    if (!nodetools::set_corepack(node_dir, force_on, err)) {
+        report.push_back("  Corepack " + std::string(force_on ? "启用" : "禁用") +
+                         "失败: " + err);
+        return report;
+    }
+    // 3) pnpm / yarn：经 Corepack 管理版本，全局可用（不单独下载二进制）
+    std::string pver, yver;
+    if (want_pnpm) {
+        if (!nodetools::install_via_corepack(node_dir, "pnpm", pver, err))
+            report.push_back("  pnpm 安装失败: " + err);
+    }
+    if (want_yarn) {
+        if (!nodetools::install_via_corepack(node_dir, "yarn", yver, err))
+            report.push_back("  yarn 安装失败: " + err);
+    }
+    // 存储位置规范化：pnpm 四目录 + npm prefix/cache，设置后逐项回读校验
+    if (want_pnpm || want_yarn) {
+        std::vector<std::wstring> pdirs;
+        if (nodetools::configure_storage(node_dir, storage_base, pdirs, err)) {
+            if (add_path)
+                for (const fs::path& d : pdirs) platform::add_path_dir(d, err);
+            report.push_back("  存储位置: " + su::wide_to_utf8(storage_base.wstring()) +
+                             "（pnpm global/global-bin/state/cache + npm prefix/cache）");
+            report.push_back("  （以上配置项已逐项回读校验）");
+        } else {
+            report.push_back("  存储位置配置失败: " + err);
+        }
+    }
+    // 1) 工具链检测：npm/npx 随装自带只检测显示；corepack/pnpm/yarn 显示状态
+    report.push_back("  工具链检测:");
+    for (const std::string& l :
+         nodetools::format_tool_lines(nodetools::detect_tools(node_dir, want_yarn)))
+        report.push_back("  " + l);
+    if (!pver.empty()) tools_line = "pnpm " + pver + "（经 Corepack 全局）";
+    if (!yver.empty())
+        tools_line += (tools_line.empty() ? "" : " / ") + std::string("yarn ") + yver +
+                      "（经 Corepack 全局）";
+    return report;
+}
+
 static int run_sdk_list(const Options& opts) {
     auto provider = prov::Registry::instance().create(opts.sdk);
     if (!provider) return 1;
@@ -1111,28 +1194,26 @@ static int run_sdk_batch(const Options& opts) {
 
     fs::path current = root / su::utf8_to_wide(provider->id()) / L"current";
 
-    // Node.js 工具链：pnpm（Corepack，全局）+ 存储位置规范化（npm 同步配置）
-    std::vector<fs::path> pnpm_path_dirs;
-    std::string pnpm_line;
-    if (provider->id() == "node" && opts.with_pnpm) {
-        fs::path nd = root / "node" / "current";
+    // Node.js 工具链（优先级：npm/npx 随装自带 → Corepack 开关 → pnpm/yarn 经 Corepack）
+    std::vector<std::string> tool_report;
+    if (provider->id() == "node") {
+        fs::path nd = root; // node 平铺安装，node 目录即安装根目录
+        bool want_pnpm = opts.with_pnpm;
+        bool want_yarn = opts.with_yarn;
+        bool corepack_on = opts.corepack_mode != "disable"; // 默认启用
+        if ((want_pnpm || want_yarn) && !corepack_on) {
+            corepack_on = true; // pnpm/yarn 依赖 Corepack 管理，选装时强制启用
+            logx::line("pnpm/yarn 依赖 Corepack 管理，已自动启用 Corepack");
+        }
         fs::path base = opts.pnpm_home.empty()
                             ? root / L"pnpm-repository"
                             : resolve_dir(su::utf8_to_wide(opts.pnpm_home));
-        std::vector<std::wstring> pdirs;
-        std::string o, e2;
-        printf("正在配置 pnpm（Corepack，全局）…\n");
-        if (!nodetools::install_via_corepack(nd, "pnpm", pnpm_line, e2)) {
-            printf("%spnpm 安装失败：%s%s\n", ui::kYellow, e2.c_str(), ui::kReset);
-        } else if (!nodetools::configure_storage(nd, base, pdirs, e2)) {
-            printf("%s存储位置配置失败：%s%s\n", ui::kYellow, e2.c_str(), ui::kReset);
-        } else {
-            pnpm_path_dirs = pdirs;
-            if (!opts.no_path)
-                for (const fs::path& d : pdirs) platform::add_path_dir(d, e2);
-            printf("%s存储位置: %s%s\n", ui::kGreen, su::wide_to_utf8(base.wstring()).c_str(),
-                   ui::kReset);
-        }
+        std::string tools_line;
+        printf("正在配置 Node.js 工具链（Corepack / pnpm / npm 存储位置）…\n");
+        tool_report = setup_node_toolchain(nd, corepack_on, want_pnpm, want_yarn, base,
+                                           !opts.no_path, tools_line);
+        if (!tools_line.empty())
+            logx::line("工具链: " + tools_line);
     }
 
     printf("\n%s================ 完成汇总 ================%s\n", ui::kCyan, ui::kReset);
@@ -1145,7 +1226,9 @@ static int run_sdk_batch(const Options& opts) {
                .c_str());
     printf("  current : %s\n", su::wide_to_utf8(current.wstring()).c_str());
     if (!verify_line.empty()) printf("  %s\n", verify_line.c_str());
-    if (!pnpm_line.empty()) printf("  %s\n", pnpm_line.c_str());
+    if (!tool_report.empty()) {
+        for (const std::string& l : tool_report) printf("  %s\n", l.c_str());
+    }
     if (!opts.no_path)
         printf("  PATH/环境变量已写入（重新打开终端后生效）\n");
     printf("%s==========================================%s\n", ui::kCyan, ui::kReset);
@@ -1223,7 +1306,8 @@ static const char* step_hints(int st) {
         case S_PyFile: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
         case S_PyConfirm: return "Enter 开始 · I 自动安装 · P 加PATH · K 留包 · Esc 返回";
         case S_SdkVersion: return "直接输入过滤 · ↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
-        case S_SdkConfirm: return "Enter 开始 · P 加PATH/环境变量 · Esc 返回";
+        case S_SdkConfirm:
+            return "Enter 开始 · P 加PATH · C Corepack · N pnpm · Y yarn · Esc 返回";
         case S_PyCheck: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
         case S_SdkCheck: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
     }
@@ -1374,6 +1458,19 @@ struct AppState : std::enable_shared_from_this<AppState> {
     bool cb_path = true;  // 安装后加入用户 PATH
     bool cb_keep = false; // 安装后保留压缩包
     bool cb_install = true; // 下载后自动安装/解压（Python）
+
+    // Node.js 工具链（仅 --sdk node 生效），优先级：npm/npx（随装自带，仅检测显示）
+    // → Corepack（Node 内置，启用/禁用开关）→ pnpm/yarn（经 Corepack 管理，不下载二进制）
+    bool cb_corepack = true;  // 启用 Corepack（管理 pnpm/yarn，默认开启）
+    bool cb_pnpm = true;      // 安装后经 Corepack 全局安装 pnpm（默认开启）
+    bool cb_yarn = false;     // 同时经 Corepack 全局安装 yarn
+    std::string pnpm_base;    // pnpm/npm 存储根目录（空 = <安装目录>\pnpm-repository）
+    std::vector<std::string> sdk_tool_lines;   // 完成页：安装后工具链配置/检测报告
+    std::vector<std::string> sdk_tool_rows;    // 版本页：本机 PATH 工具链检测行
+    std::vector<std::string> sdk_tools_result; // 后台检测结果暂存（UI 线程合并）
+    std::atomic<bool> sdk_tools_ready{false};
+    bool sdk_tools_probed = false;             // 本会话已探测过本机工具链（node）
+    std::thread sdk_tools_thread;
 
     // Python 管理
     bool pymode = false;
@@ -1538,6 +1635,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         exiting = true;
         if (w_thread.joinable()) w_thread.detach();
         if (ver_thread.joinable()) ver_thread.detach();
+        if (sdk_tools_thread.joinable()) sdk_tools_thread.detach();
     }
 
     // ---------------- 导航 ----------------
@@ -1569,6 +1667,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 break;
             case S_SdkVersion:
                 sdk_screen_err.clear();
+                if (sdk_id == "node" && !sdk_tools_probed)
+                    begin_node_tools_probe(); // 后台检测本机 node/npm/pnpm/yarn 版本
                 if (sdk_versions_for != sdk_id) { // 切换了目标 → 丢弃旧列表并重载
                     sdk_versions.clear();
                     sdk_query.clear();
@@ -2282,6 +2382,34 @@ struct AppState : std::enable_shared_from_this<AppState> {
         sdk_file = f;
         go(S_Path);
     }
+
+    // 本机 PATH 工具链检测（仅 node，后台执行，不阻塞 UI）。
+    // npm/npx 随装自带只检测显示；corepack/pnpm/yarn 显示启用状态。
+    void begin_node_tools_probe() {
+        if (sdk_tools_probed) return;
+        sdk_tools_probed = true;
+        auto self = shared_from_this();
+        sdk_tools_thread = std::thread([self] {
+            std::error_code cec;
+            fs::path wd = fs::current_path(cec); // 借 PATH 解析 .cmd，无需知道安装目录
+            if (cec) wd = L".";                  // cwd 失效时退回当前目录占位
+            std::vector<std::string> rows;
+            std::string nv = nodetools::tool_version(wd, "node");
+            rows.push_back(nv.empty() ? "  node 未检测到（本机 PATH）"
+                                      : "  node " + nv + "（本机 PATH）");
+            for (const std::string& l :
+                 nodetools::format_tool_lines(nodetools::detect_tools(wd, false)))
+                rows.push_back(l);
+            self->sdk_tools_result = std::move(rows);
+            self->sdk_tools_ready = true;
+            if (!self->exiting) self->screen.PostEvent(Event::Custom);
+        });
+    }
+    void finish_node_tools_probe() {
+        if (sdk_tools_thread.joinable()) sdk_tools_thread.join();
+        sdk_tool_rows = std::move(sdk_tools_result);
+        sdk_tools_result.clear();
+    }
     void start_sdk_work() {
         if (!sdk_provider) return;
         reset_work("正在下载 " + sdk_provider->display() + " " + sdk_file.version);
@@ -2308,10 +2436,17 @@ struct AppState : std::enable_shared_from_this<AppState> {
             }
         };
         auto cancelled = [self] { return self->w_cancel.load(); };
-        bool with_pnpm = cb_pnpm && sdk_id == "node";
-        std::string pnpm_base0 = pnpm_base;
-        w_thread = std::thread([self, f, root, add_path, prog, cancelled, with_pnpm,
-                                pnpm_base0] {
+        bool is_node = sdk_id == "node";
+        bool want_pnpm = cb_pnpm && is_node;
+        bool want_yarn = cb_yarn && is_node;
+        bool corepack_on = cb_corepack && is_node;
+        // 存储根目录在 UI 线程解析（相对路径/环境变量展开），默认 <root>\pnpm-repository
+        fs::path storage =
+            pnpm_base.empty()
+                ? root / L"pnpm-repository"
+                : resolve_dir(su::utf8_to_wide(pnpm_base));
+        w_thread = std::thread([self, f, root, add_path, prog, cancelled, is_node, want_pnpm,
+                                want_yarn, corepack_on, storage] {
             std::string err, vline;
             if (!prov::install_to_root(*self->sdk_provider, f, root, add_path, false, true,
                                        prog, cancelled, vline, err)) {
@@ -2322,33 +2457,25 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 if (!self->exiting) self->screen.PostEvent(Event::Custom);
                 return;
             }
-            // Node.js：pnpm（Corepack 全局）+ pnpm/npm 存储位置规范化（npm 同步配置）
-            if (with_pnpm) {
-                fs::path nd = root / "node" / "current";
+            // Node.js 工具链：npm/npx 随装自带（仅检测显示）→ Corepack 开关 →
+            // pnpm/yarn（经 Corepack，全局）→ 存储位置规范化 → 检测报告
+            std::vector<std::string> tool_lines;
+            if (is_node) {
+                fs::path nd = root; // node 平铺安装，node 目录即安装根目录
                 {
                     std::lock_guard<std::mutex> lk(self->wmu);
-                    self->w_note = "正在配置 pnpm（Corepack，全局）…";
+                    self->w_note = "正在配置工具链（Corepack / pnpm / 存储位置）…";
                 }
                 if (!self->exiting) self->screen.PostEvent(Event::Custom);
-                std::string o, e3;
-                nodetools::run_tool(nd, "corepack", L"enable pnpm", o, e3, 120000);
-                nodetools::run_tool(nd, "corepack", L"prepare pnpm@latest --activate", o, e3,
-                                    600000);
-                fs::path base = pnpm_base0.empty() ? root / L"pnpm-repository"
-                                                   : fs::path(pnpm_base0);
-                std::vector<std::wstring> pdirs;
-                if (nodetools::configure_storage(nd, base, pdirs, e3)) {
-                    self->pnpm_base = su::wide_to_utf8(base.wstring());
-                    for (const fs::path& d : pdirs) platform::add_path_dir(d, e3);
-                } else {
-                    self->sdk_screen_err = "pnpm 存储配置失败: " + e3;
-                }
-                std::string pv = nodetools::tool_version(nd, "pnpm");
-                if (!pv.empty()) vline += "  /  pnpm " + pv;
+                std::string tools_line;
+                tool_lines = setup_node_toolchain(nd, corepack_on, want_pnpm, want_yarn,
+                                                  storage, add_path, tools_line);
+                if (!tools_line.empty()) vline += (vline.empty() ? "" : "  /  ") + tools_line;
             }
             {
                 std::lock_guard<std::mutex> lk(self->wmu);
                 self->sdk_verify_line = vline;
+                self->sdk_tool_lines = std::move(tool_lines);
                 self->w_phase = 1;
             }
             self->w_finished = true;
@@ -2591,9 +2718,13 @@ struct AppState : std::enable_shared_from_this<AppState> {
     std::vector<std::string> done_lines() {
         std::vector<std::string> v;
         if (!sdk_id.empty() && sdk_provider) {
+            fs::path ready = sdk_provider->multi_version()
+                                 ? s.dir / su::utf8_to_wide(sdk_id) / L"current"
+                                 : s.dir; // node 平铺安装，根目录即 node 目录
             v.push_back("√ " + sdk_provider->display() + " " + sdk_file.version +
-                        " 就绪: " + w(s.dir / su::utf8_to_wide(sdk_id) / L"current"));
+                        " 就绪: " + w(ready));
             if (!sdk_verify_line.empty()) v.push_back(sdk_verify_line);
+            for (const std::string& l : sdk_tool_lines) v.push_back(l);
             if (s.path_added) v.push_back("√ 已加入 PATH/环境变量（重新打开终端后生效）");
             return v;
         }
@@ -2621,6 +2752,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         if (!sdk_id.empty()) {
             sdk_query.clear();
             sdk_verify_line.clear();
+            sdk_tool_lines.clear();
             sdk_file = prov::Artifact{};
             refilter_sdk_versions();
             enter(S_SdkVersion);
@@ -2675,6 +2807,14 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     Session& s = *sp_s;
 
     st->py_installed = py::detect_installed();
+
+    // CLI 预设（TUI 模式下同样生效）：Node.js 工具链选项与存储位置
+    if (s.opt.sdk == "node") {
+        if (s.opt.corepack_mode == "disable") st->cb_corepack = false;
+        if (s.opt.with_yarn) st->cb_yarn = true;
+        if (s.opt.with_pnpm || s.opt.with_yarn) st->cb_corepack = true; // 依赖 Corepack
+        if (!s.opt.pnpm_home.empty()) st->pnpm_base = s.opt.pnpm_home;
+    }
 
     // 检测 rustup 托管
     if (s.rust_ok) {
@@ -3059,29 +3199,66 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         }
         v.push_back(text(""));
         v.push_back(text("共 " + std::to_string(n) + " 个版本") | dim);
+        // 本机工具链检测（node）：npm/npx 随装自带只检测显示；pnpm/yarn 显示启用状态
+        if (st->sdk_id == "node" && !st->sdk_tool_rows.empty()) {
+            v.push_back(text(""));
+            v.push_back(separator());
+            v.push_back(text(" 本机工具链检测：") | bold);
+            for (const std::string& l : st->sdk_tool_rows) v.push_back(text(l) | dim);
+        }
         return window(text(disp + " 版本"), vbox(std::move(v)));
     });
 
     // ---- SDK 确认 ----
-    Component sdkconfirm_screen = Renderer([st]() -> Element {
+    // 存储位置输入（仅 node 显示）：空 = 默认 <安装目录>\pnpm-repository
+    InputOption nio;
+    nio.content = &st->pnpm_base;
+    nio.placeholder = "默认: <安装目录>\\pnpm-repository";
+    Component pnpm_inp = Input(&st->pnpm_base, nio);
+    Component sdkconfirm_screen = Renderer(pnpm_inp, [st, pnpm_inp]() -> Element {
         Element p_line =
             st->cb_path ? text("[√] 写入 PATH 与环境变量   （P 切换）") | color(Color::Green)
                         : text("[ ] 写入 PATH 与环境变量   （P 切换）");
-        std::wstring layout = st->s.dir.wstring() + L"\\versions\\<sdk>\\<版本>，current 为 junction";
-        Element v = vbox({
+        bool multi = st->sdk_provider && st->sdk_provider->multi_version();
+        std::wstring layout =
+            st->s.dir.wstring() +
+            (multi ? L"\\versions\\<sdk>\\<版本>，current 为 junction" : L"（平铺单目录）");
+        Elements rows = {
             text("目标     : " + (st->sdk_provider ? st->sdk_provider->display() : st->sdk_id)),
             text("版本     : " + st->sdk_file.version),
             text("文件     : " + st->sdk_file.filename),
             text("校验     : " + std::string(!st->sdk_file.sha256.empty() ? "SHA-256" : "下载完整性")),
-            text("模式     : 多版本目录 + current junction"),
+            text("模式     : " + std::string(multi ? "多版本目录 + current junction" : "平铺单目录")),
             text("根目录   : " + w(st->s.dir)),
             text("布局     : " + su::wide_to_utf8(layout)),
             text(""),
             p_line,
-            text(""),
-            st->sdk_screen_err.empty() ? text("") : text(st->sdk_screen_err) | color(Color::Red),
-        });
-        return window(text("确认安装信息"), v);
+        };
+        if (st->sdk_id == "node") {
+            // Node.js 工具链优先级：npm/npx 随装自带 → Corepack 开关 → pnpm/yarn 经 Corepack
+            rows.push_back(separator());
+            rows.push_back(text(" Node.js 工具链: npm/npx 随装自带（装后自动检测显示版本）") | dim);
+            rows.push_back(st->cb_corepack
+                               ? text("[√] 启用 Corepack（Node 内置，管理 pnpm/yarn）（C 切换）") |
+                                     color(Color::Green)
+                               : text("[ ] 启用 Corepack（Node 内置，管理 pnpm/yarn）（C 切换）"));
+            rows.push_back(st->cb_pnpm
+                               ? text("[√] 安装 pnpm（经 Corepack，全局）           （N 切换）") |
+                                     color(Color::Green)
+                               : text("[ ] 安装 pnpm（经 Corepack，全局）           （N 切换）"));
+            rows.push_back(st->cb_yarn
+                               ? text("[√] 安装 yarn（经 Corepack，全局）           （Y 切换）") |
+                                     color(Color::Green)
+                               : text("[ ] 安装 yarn（经 Corepack，全局）           （Y 切换）"));
+            rows.push_back(hbox({text(" 存储位置: "), pnpm_inp->Render() | flex}));
+            rows.push_back(text("   pnpm global-dir/global-bin-dir/state-dir/cache-dir 与"
+                                " npm prefix/cache 规范至此目录") |
+                            dim);
+        }
+        rows.push_back(text(""));
+        rows.push_back(st->sdk_screen_err.empty() ? text("")
+                                                  : text(st->sdk_screen_err) | color(Color::Red));
+        return window(text("确认安装信息"), vbox(std::move(rows)));
     });
 
     // ---- Python 检测屏 ----
@@ -3127,6 +3304,8 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
 
     // ---- 全局事件 ----
     Component router = CatchEvent(tab, [st](Event e) {
+        // 本机工具链检测完成 → 任意事件时合并（防止循环启动前的 Custom 事件丢失）
+        if (st->sdk_tools_ready.exchange(false)) st->finish_node_tools_probe();
         if (e == Event::Custom) {
             if (st->w_finished.exchange(false)) {
                 if (st->w_thread.joinable()) st->w_thread.join();
@@ -3358,6 +3537,28 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             if (st->step == S_SdkConfirm && (ch == "p" || ch == "P")) {
                 st->cb_path = !st->cb_path;
                 return true;
+            }
+            if (st->step == S_SdkConfirm && st->sdk_id == "node") {
+                // 工具链开关联动：Corepack 关闭 → pnpm/yarn 一并取消；
+                // 选装 pnpm/yarn → 自动启用 Corepack（二者经其管理）
+                if (ch == "c" || ch == "C") {
+                    st->cb_corepack = !st->cb_corepack;
+                    if (!st->cb_corepack) {
+                        st->cb_pnpm = false;
+                        st->cb_yarn = false;
+                    }
+                    return true;
+                }
+                if (ch == "n" || ch == "N") {
+                    st->cb_pnpm = !st->cb_pnpm;
+                    if (st->cb_pnpm) st->cb_corepack = true;
+                    return true;
+                }
+                if (ch == "y" || ch == "Y") {
+                    st->cb_yarn = !st->cb_yarn;
+                    if (st->cb_yarn) st->cb_corepack = true;
+                    return true;
+                }
             }
             if (st->step == S_Confirm && (ch == "m" || ch == "M")) {
                 st->s.mirror = st->s.mirror >= 2 ? -1 : st->s.mirror + 1;

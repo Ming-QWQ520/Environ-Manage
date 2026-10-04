@@ -64,6 +64,9 @@
     <ClInclude Include="providers/node/node_provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
+    <ClInclude Include="providers/node_tools.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
     <ClInclude Include="providers/jdk/jdk_provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
