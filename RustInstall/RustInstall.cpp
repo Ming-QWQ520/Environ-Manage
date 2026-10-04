@@ -9,8 +9,10 @@
 #include <shellapi.h>
 
 #include <chrono>
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -86,8 +88,12 @@ static void print_usage() {
         "      --sdk <id>          node / jdk / go / dotnet\n"
         "      --sdk-list          仅列出该 SDK 的版本后退出\n"
         "      --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）\n"
-        "      布局: <目录>\\versions\\<sdk>\\<版本>，<目录>\\<sdk>\\current 指向当前版\n"
-        "      本\n"
+        "      布局: <目录>\\<版本>，<目录>\\current junction 指向当前版本\n"
+        "\n"
+        "卸载（批处理模式；多语言统一布局 <目录>\\<版本>）:\n"
+        "      --uninstall [版本|all]\n"
+        "                          卸载受管安装（配合 --sdk <id> / --python；Rust 直接\n"
+        "                          --uninstall all）\n"
         "\n"
         "Node.js 工具链（--sdk node，优先级: npm/npx 随装自带 → Corepack 开关 →\n"
         "pnpm/yarn 经 Corepack 管理，不单独下载二进制）:\n"
@@ -145,6 +151,9 @@ struct Options {
     bool with_yarn = false;            // node 安装后经 Corepack 全局安装 yarn
     std::string corepack_mode;         // "" / enable（默认）| disable
     std::string pnpm_home;             // pnpm/npm 存储根目录（默认 <root>\pnpm-repository）
+    // 卸载（批处理模式）：--uninstall [版本|all]
+    bool uninstall = false;
+    std::string uninstall_target = "all";
 };
 
 static bool valid_triple(const std::string& t) {
@@ -275,6 +284,10 @@ static Options parse_args(int argc, wchar_t** argv, bool& ok) {
             wchar_t* v = need_value(i, a.c_str());
             if (!v) return o;
             o.pnpm_home = su::wide_to_utf8(v);
+        } else if (a == "--uninstall") {
+            o.uninstall = true;
+            if (i + 1 < argc && argv[i + 1][0] != L'-')
+                o.uninstall_target = su::wide_to_utf8(argv[++i]);
         } else if (a == "--list") {
             o.list = true;
         } else if (a == "--no-install") {
@@ -808,6 +821,7 @@ static int run_batch(const Options& opts) {
         return 1;
     }
     printf("%s√ 解压安装完成%s\n\n", ui::kGreen, ui::kReset);
+    platform::managed_add_root("rust", dir); // 记录受管安装（供检测/卸载）
     if (!outcome.rustc_v.empty())
         printf("  rustc : %s%s%s\n", ui::kGreen, outcome.rustc_v.c_str(), ui::kReset);
     if (!outcome.cargo_v.empty())
@@ -999,44 +1013,59 @@ static int run_py_batch(const Options& opts) {
     }
     printf("%s校验通过\n%s", ui::kGreen, ui::kReset);
 
-    // 安装 / 解压 / 保留
+    // 安装 / 解压 / 保留（统一版本化布局：<目录>\<版本> + <目录>\current junction）
+    fs::path ver_dir = dir / su::utf8_to_wide(ver);
+    fs::path py_current = dir / L"current";
     std::string l = su::lower(f.filename);
     if (opts.py_install && su::ends_with(l, ".exe")) {
         printf("正在静默安装（per-user，TargetDir=%s）…\n",
-               su::wide_to_utf8(dir.wstring()).c_str());
-        if (!py::install_exe(dest, dir, !opts.no_path, err)) {
+               su::wide_to_utf8(ver_dir.wstring()).c_str());
+        if (!py::install_exe(dest, ver_dir, false, err)) {
             printf("%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
             return 1;
         }
         std::string vout;
-        if (py::verify_install(dir, vout, err))
+        if (py::verify_install(ver_dir, vout, err))
             printf("%s%s%s\n", ui::kGreen, vout.c_str(), ui::kReset);
     } else if (opts.py_install && su::ends_with(l, ".zip")) {
-        printf("正在解压到 %s …\n", su::wide_to_utf8(dir.wstring()).c_str());
-        if (!py::extract_zip(dest, dir, err)) {
+        printf("正在解压到 %s …\n", su::wide_to_utf8(ver_dir.wstring()).c_str());
+        if (!py::extract_zip(dest, ver_dir, err)) {
             printf("%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
             return 1;
         }
         std::string vout;
-        if (py::verify_install(dir, vout, err))
+        if (py::verify_install(ver_dir, vout, err))
             printf("%s%s%s\n", ui::kGreen, vout.c_str(), ui::kReset);
-        if (!opts.no_path) {
-            std::string perr;
-            if (dist::add_to_user_path(dir, perr))
-                printf("%s√ 已将 %s 加入用户 PATH%s\n", ui::kGreen,
-                       su::wide_to_utf8(dir.wstring()).c_str(), ui::kReset);
-        }
     } else if (su::ends_with(l, ".msi")) {
         printf("MSI 包已就绪（脚本模式不自动安装）：\n  msiexec /i \"%s\" TARGETDIR=\"%s\"\n",
-               su::wide_to_utf8(dest.wstring()).c_str(), su::wide_to_utf8(dir.wstring()).c_str());
+               su::wide_to_utf8(dest.wstring()).c_str(),
+               su::wide_to_utf8(ver_dir.wstring()).c_str());
     } else {
         printf("已保留安装包（--py-install 可启用自动安装）\n");
+    }
+
+    // junction + PATH + 受管记录（检测/卸载的依据）
+    bool layout_done = false;
+    if (fs::exists(ver_dir / L"python.exe", ec)) {
+        if (!platform::make_junction(py_current, ver_dir, err)) {
+            printf("%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+            return 1;
+        }
+        if (!opts.no_path) {
+            std::string perr;
+            platform::add_path_dir(py_current, perr);
+            platform::add_path_dir(py_current / L"Scripts", perr);
+        }
+        platform::managed_add_root("python", dir);
+        layout_done = true;
     }
 
     printf("\n%s================ 完成汇总 ================%s\n", ui::kCyan, ui::kReset);
     printf("  版本    : Python %s (%s)\n", ver.c_str(), f.release_date.c_str());
     printf("  文件    : %s\n", f.filename.c_str());
-    printf("  目录    : %s\n", su::wide_to_utf8(dir.wstring()).c_str());
+    printf("  版本目录: %s\n", su::wide_to_utf8(ver_dir.wstring()).c_str());
+    if (layout_done)
+        printf("  current : %s（junction）\n", su::wide_to_utf8(py_current.wstring()).c_str());
     printf("%s==========================================%s\n", ui::kCyan, ui::kReset);
     return 0;
 }
@@ -1192,12 +1221,12 @@ static int run_sdk_batch(const Options& opts) {
     }
     ui::progress_done(f.size, true);
 
-    fs::path current = root / su::utf8_to_wide(provider->id()) / L"current";
+    fs::path current = root / L"current";
 
     // Node.js 工具链（优先级：npm/npx 随装自带 → Corepack 开关 → pnpm/yarn 经 Corepack）
     std::vector<std::string> tool_report;
     if (provider->id() == "node") {
-        fs::path nd = root; // node 平铺安装，node 目录即安装根目录
+        fs::path nd = root / su::utf8_to_wide(f.version); // 版本目录（node.exe 所在）
         bool want_pnpm = opts.with_pnpm;
         bool want_yarn = opts.with_yarn;
         bool corepack_on = opts.corepack_mode != "disable"; // 默认启用
@@ -1219,12 +1248,10 @@ static int run_sdk_batch(const Options& opts) {
     printf("\n%s================ 完成汇总 ================%s\n", ui::kCyan, ui::kReset);
     printf("  目标    : %s %s [%s]\n", provider->display().c_str(), f.version.c_str(),
            vi.tag_label.c_str());
-    printf("  多版本  : %s\n",
-           su::wide_to_utf8((root / "versions" / su::utf8_to_wide(provider->id()) /
-                             su::utf8_to_wide(f.version))
-                                .wstring())
+    printf("  版本目录: %s\n",
+           su::wide_to_utf8((root / su::utf8_to_wide(f.version)).wstring())
                .c_str());
-    printf("  current : %s\n", su::wide_to_utf8(current.wstring()).c_str());
+    printf("  current : %s（junction）\n", su::wide_to_utf8(current.wstring()).c_str());
     if (!verify_line.empty()) printf("  %s\n", verify_line.c_str());
     if (!tool_report.empty()) {
         for (const std::string& l : tool_report) printf("  %s\n", l.c_str());
@@ -1233,6 +1260,182 @@ static int run_sdk_batch(const Options& opts) {
         printf("  PATH/环境变量已写入（重新打开终端后生效）\n");
     printf("%s==========================================%s\n", ui::kCyan, ui::kReset);
     return 0;
+}
+
+// --------------------------------------------------------------- 卸载（批处理入口 + TUI 共用工具）
+
+// Python 版本卸载：删除版本目录、维护 current junction、清理 PATH 与受管记录
+static bool uninstall_python_version(const fs::path& root, const std::string& version,
+                                     std::string& err) {
+    std::error_code ec;
+    fs::path ver_dir = root / su::utf8_to_wide(version);
+    if (!fs::is_directory(ver_dir, ec)) {
+        err = "未找到版本目录 " + su::wide_to_utf8(ver_dir.wstring());
+        return false;
+    }
+    if (!fs::exists(ver_dir / L"python.exe", ec)) {
+        err = "目录不是受本工具管理的 Python 版本目录：" +
+              su::wide_to_utf8(ver_dir.wstring());
+        return false;
+    }
+    fs::path junction = root / L"current";
+    if (fs::exists(junction, ec)) {
+        std::error_code ec2;
+        if (fs::equivalent(junction, ver_dir, ec2)) {
+            fs::remove(junction, ec2);
+            logx::linef("已移除 junction: %s", su::wide_to_utf8(junction.wstring()).c_str());
+        }
+    }
+    logx::linef("正在删除版本目录: %s", su::wide_to_utf8(ver_dir.wstring()).c_str());
+    fs::remove_all(ver_dir, ec);
+    if (ec) {
+        err = "删除版本目录失败：" + ec.message() +
+              "（可能有程序正在使用该目录，请关闭后重试）";
+        return false;
+    }
+    // 剩余版本 → junction 重新指向最近使用的版本；无剩余 → PATH/受管记录清理
+    std::vector<fs::path> remain;
+    for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+        if (!e.is_directory()) continue;
+        std::string n = su::wide_to_utf8(e.path().filename().wstring());
+        if (n == "current" || n == "archives" || (!n.empty() && n[0] == '_')) continue;
+        if (fs::exists(e.path() / L"python.exe", ec)) remain.push_back(e.path());
+    }
+    if (!remain.empty()) {
+        fs::path best;
+        std::error_code tec;
+        fs::file_time_type bt{};
+        for (const fs::path& p : remain) {
+            fs::file_time_type t = fs::last_write_time(p, tec);
+            if (tec || best.empty() || bt < t) {
+                best = p;
+                bt = t;
+            }
+        }
+        if (!platform::make_junction(junction, best, err)) return false;
+        logx::linef("current 已切换到: %s",
+                    su::wide_to_utf8(best.filename().wstring()).c_str());
+        return true;
+    }
+    fs::remove(junction, ec);
+    std::string perr;
+    platform::remove_path_dir(junction, perr);
+    platform::remove_path_dir(junction / L"Scripts", perr);
+    platform::managed_remove_root("python", root);
+    return true;
+}
+
+// Rust 安装卸载（平铺布局特例）：删除安装目录 + PATH 清理 + 受管记录移除
+static bool uninstall_rust_root(const fs::path& root, std::string& err) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) {
+        err = "未找到安装目录 " + su::wide_to_utf8(root.wstring());
+        return false;
+    }
+    logx::linef("正在删除 Rust 安装目录: %s", su::wide_to_utf8(root.wstring()).c_str());
+    fs::remove_all(root, ec);
+    if (ec) {
+        err = "删除安装目录失败：" + ec.message() +
+              "（可能有程序正在使用该目录，请关闭后重试）";
+        return false;
+    }
+    std::string perr;
+    platform::remove_path_dir(root / L"bin", perr);
+    platform::managed_remove_root("rust", root);
+    return true;
+}
+
+// 批处理卸载入口：--uninstall [版本|all]（配合 --sdk / --python；Rust 直接 --uninstall all）
+static int run_uninstall_batch(const Options& opts) {
+    print_banner();
+    std::string target = opts.uninstall_target;
+    bool all = su::lower(target) == "all" || target.empty();
+    int failures = 0, done = 0;
+
+    if (opts.python) {
+        auto roots = platform::managed_get_roots("python");
+        if (roots.empty()) {
+            printf("%s未找到本工具管理的 Python 安装记录。%s\n", ui::kYellow, ui::kReset);
+            return 1;
+        }
+        for (const std::wstring& r : roots) {
+            fs::path root(r);
+            std::vector<std::string> vers;
+            std::error_code ec;
+            for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+                if (!e.is_directory()) continue;
+                std::string n = su::wide_to_utf8(e.path().filename().wstring());
+                if (n == "current" || n == "archives" || (!n.empty() && n[0] == '_')) continue;
+                if (fs::exists(e.path() / L"python.exe", ec)) vers.push_back(n);
+            }
+            for (const std::string& v : vers) {
+                if (!all && v != target) continue;
+                std::string err;
+                printf("卸载 Python %s（%s）…\n", v.c_str(),
+                       su::wide_to_utf8(root.wstring()).c_str());
+                if (uninstall_python_version(root, v, err)) {
+                    printf("%s√ 已卸载%s\n", ui::kGreen, ui::kReset);
+                    done++;
+                } else {
+                    printf("%s卸载失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+                    failures++;
+                }
+            }
+        }
+        if (done == 0 && failures == 0) {
+            printf("%s未找到版本 %s（可用 --uninstall all 卸载全部）%s\n", ui::kRed,
+                   target.c_str(), ui::kReset);
+            return 1;
+        }
+    } else if (!opts.sdk.empty()) {
+        auto provider = prov::Registry::instance().create(opts.sdk);
+        if (!provider) return 1;
+        auto installs = prov::managed_installs(*provider);
+        if (installs.empty()) {
+            printf("%s未找到本工具管理的 %s 安装。%s\n", ui::kYellow,
+                   provider->display().c_str(), ui::kReset);
+            return 1;
+        }
+        for (auto& [ver, dir] : installs) {
+            if (!all && ver != target) continue;
+            fs::path root = dir.parent_path();
+            std::string err;
+            printf("卸载 %s %s（%s）…\n", provider->display().c_str(), ver.c_str(),
+                   su::wide_to_utf8(dir.wstring()).c_str());
+            if (prov::uninstall_version(*provider, root, ver, err)) {
+                printf("%s√ 已卸载%s\n", ui::kGreen, ui::kReset);
+                done++;
+            } else {
+                printf("%s卸载失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+                failures++;
+            }
+        }
+        if (done == 0 && failures == 0) {
+            printf("%s未找到版本 %s（可用 --uninstall all 卸载全部）%s\n", ui::kRed,
+                   target.c_str(), ui::kReset);
+            return 1;
+        }
+    } else {
+        auto roots = platform::managed_get_roots("rust");
+        if (roots.empty()) {
+            printf("%s未找到本工具管理的 Rust 安装记录。%s\n", ui::kYellow, ui::kReset);
+            return 1;
+        }
+        for (const std::wstring& r : roots) {
+            fs::path root(r);
+            std::string err;
+            printf("卸载 Rust（%s）…\n", su::wide_to_utf8(root.wstring()).c_str());
+            if (uninstall_rust_root(root, err)) {
+                printf("%s√ 已卸载%s\n", ui::kGreen, ui::kReset);
+                done++;
+            } else {
+                printf("%s卸载失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+                failures++;
+            }
+        }
+    }
+    printf("\n卸载完成：%d 成功，%d 失败。\n", done, failures);
+    return failures == 0 ? 0 : 1;
 }
 
 namespace tui {
@@ -1258,8 +1461,7 @@ enum StepIdx {
     S_PyConfirm,   // Python 确认
     S_SdkVersion,  // SDK 版本（搜索）
     S_SdkConfirm,  // SDK 确认
-    S_PyCheck,     // Python 已装检测（更新/重装/修复）
-    S_SdkCheck,    // SDK 已装检测（更新/重装/修复）
+    S_Installed,   // 已安装检测（自动检测 + 显示位置 + 更新/卸载入口）
     S_COUNT,
 };
 
@@ -1282,8 +1484,7 @@ static const char* step_tag(int st) {
         case S_PyConfirm: return "[Python · 确认]";
         case S_SdkVersion: return "[SDK · 选择版本]";
         case S_SdkConfirm: return "[SDK · 确认]";
-        case S_PyCheck: return "[Python · 检测已安装]";
-        case S_SdkCheck: return "[SDK · 检测已安装]";
+        case S_Installed: return "[已安装检测]";
     }
     return "";
 }
@@ -1308,8 +1509,8 @@ static const char* step_hints(int st) {
         case S_SdkVersion: return "直接输入过滤 · ↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
         case S_SdkConfirm:
             return "Enter 开始 · P 加PATH · C Corepack · N pnpm · Y yarn · Esc 返回";
-        case S_PyCheck: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
-        case S_SdkCheck: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
+        case S_Installed:
+            return "↑↓/W S 选择 · Enter 确认 · U 检测已装版本 · Esc 返回";
     }
     return "";
 }
@@ -1400,6 +1601,68 @@ inline fs::path find_local_archive(const fs::path& dir, const std::string& ver) 
         if (fallback.empty()) fallback = e.path();
     }
     return fallback;
+}
+
+// 版本名自然比较（数字段按数值比较）：支持 "3.12.6" / "v22.14.0" / "go1.22.0" / "21.0.12+7"
+inline int ver_natural_cmp(const std::string& a, const std::string& b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (isdigit((unsigned char)a[i]) && isdigit((unsigned char)b[j])) {
+            size_t i2 = i, j2 = j;
+            while (i2 < a.size() && isdigit((unsigned char)a[i2])) ++i2;
+            while (j2 < b.size() && isdigit((unsigned char)b[j2])) ++j2;
+            long long va = atoll(a.substr(i, i2 - i).c_str());
+            long long vb = atoll(b.substr(j, j2 - j).c_str());
+            if (va != vb) return va < vb ? -1 : 1;
+            i = i2;
+            j = j2;
+        } else {
+            if (a[i] != b[j]) return (unsigned char)a[i] < (unsigned char)b[j] ? -1 : 1;
+            ++i;
+            ++j;
+        }
+    }
+    if (i < a.size()) return 1;
+    if (j < b.size()) return -1;
+    return 0;
+}
+
+// 从 --version 输出行提取版本 token（node: v22.14.0 / go: go1.22.0 / java: 引号内 / 其余取尾 token）
+inline std::string extract_ver_token(const std::string& lang, const std::string& line) {
+    if (lang == "jdk") {
+        size_t q1 = line.find('"');
+        size_t q2 = q1 == std::string::npos ? std::string::npos : line.find('"', q1 + 1);
+        if (q1 != std::string::npos && q2 != std::string::npos)
+            return line.substr(q1 + 1, q2 - q1 - 1);
+        return line;
+    }
+    if (lang == "go" || lang == "node") {
+        const char* prefix = lang == "go" ? "go" : "v";
+        for (size_t k = 0; k + 2 < line.size(); ++k) {
+            bool hit = line[k] == prefix[0] && line[k + 1] == prefix[1] &&
+                       isdigit((unsigned char)line[k + 2]);
+            if (!hit && lang == "node") hit = line[k] == 'v' && isdigit((unsigned char)line[k + 1]);
+            if (hit) {
+                size_t end = k;
+                while (end < line.size() && !isspace((unsigned char)line[end])) ++end;
+                return line.substr(k, end - k);
+            }
+        }
+        return line;
+    }
+    size_t end = line.find_last_not_of(" \t\r");
+    if (end == std::string::npos) return line;
+    size_t start = line.find_last_of(" \t\r", end);
+    return line.substr(start == std::string::npos ? 0 : start + 1, end - start);
+}
+
+// p 是否位于 root 之下（大小写不敏感，忽略末尾反斜杠）
+inline bool path_under(const fs::path& p, const fs::path& root) {
+    std::wstring a = su::lower(p.wstring()), b = su::lower(root.wstring());
+    while (!a.empty() && a.back() == L'\\') a.pop_back();
+    while (!b.empty() && b.back() == L'\\') b.pop_back();
+    if (b.empty() || a.size() <= b.size()) return false;
+    return a.compare(0, b.size(), b) == 0 && a[b.size()] == L'\\';
 }
 
 // 所有 UI 状态（shared_ptr 持有，闭包按值捕获，生命周期安全）
@@ -1493,84 +1756,250 @@ struct AppState : std::enable_shared_from_this<AppState> {
     std::string py_verify_line;
     std::vector<py::InstalledPy> py_installed;
     bool py_repair = false; // Python 修复模式（本地包优先）
-    std::vector<std::string> py_check_items; // 检测屏菜单
-    int py_check_sel = 0;
-    std::string py_check_title;
-    std::string sdk_check_title;
-    bool sdk_repair = false;
-    std::vector<std::string> sdk_check_items;
-    int sdk_check_sel = 0;
-    std::string sdk_installed_max;
-    std::string sdk_installed_display;
-    std::string py_installed_max;            // 已装的最高版本
-    std::string py_check_target;             // 当前选中的动作目标版本
-    std::atomic<bool> py_check_pending{false};
 
-    // 已装 Python（注册表 + 管理目录 versions/python/*），取最高版本
-    std::string py_detect_installed_max() {
+    // ---- 已安装检测（统一屏：Python / SDK；Rust 走检查更新屏） ----
+    struct InstRow {
+        std::string version;
+        std::string path; // 版本目录（utf8 显示）
+        bool managed = false;
+    };
+    enum { IA_INSTALL = 0, IA_UPDATE, IA_UNINSTALL, IA_BACK };
+    std::vector<InstRow> inst_rows;
+    std::atomic<bool> inst_done{false};
+    std::thread inst_thread;
+    std::vector<std::string> inst_items;              // 动作菜单（与 inst_actions 对齐）
+    std::vector<std::pair<int, size_t>> inst_actions; // (动作, 行下标)
+    int inst_sel = 0;
+    std::string inst_detect_lang; // 检测结果所属语言（防止切换目标后显示旧结果）
+    bool inst_confirm = false;    // 卸载二次确认状态
+    std::string inst_confirm_ver; // 待确认卸载的版本
+    fs::path inst_confirm_dir;    // 待确认卸载的版本目录
+    std::vector<std::string> uninstall_lines; // 卸载完成页展示
+
+    std::string inst_lang_disp() const {
+        if (pymode) return "Python";
+        return sdk_provider ? sdk_provider->display() : "SDK";
+    }
+    std::string inst_lang_id() const { return pymode ? "python" : sdk_id; }
+
+    // 受管版本中的最高版本（自然序比较）
+    std::string inst_managed_max() const {
         std::string best;
-        for (const py::InstalledPy& p : py_installed)
-            if (py::version_cmp(p.version, best) > 0) best = p.version;
-        std::error_code ec;
-        fs::path mgr = s.dir / "versions" / "python";
-        if (fs::is_directory(mgr, ec))
-            for (const fs::directory_entry& e : fs::directory_iterator(mgr)) {
-                if (!e.is_directory() || !fs::exists(e.path() / L"python.exe", ec)) continue;
-                std::string v = su::wide_to_utf8(e.path().filename().wstring());
-                if (py::version_cmp(v, best) > 0) best = v;
-            }
+        for (const InstRow& r : inst_rows)
+            if (r.managed && (best.empty() || ver_natural_cmp(r.version, best) > 0))
+                best = r.version;
         return best;
     }
-    void begin_py_check() {
-        py_installed_max = py_detect_installed_max();
-        py_check_sel = 0;
-        py_check_items.clear();
-        std::string newest =
-            py_versions.empty() ? std::string() : py_versions[0].version;
-        if (newest.empty()) return;
-        if (py::version_cmp(py_installed_max, newest) < 0) {
-            py_check_title = "检测到新版本：" + newest + "（当前 " +
-                             (py_installed_max.empty() ? "未安装" : py_installed_max) + "）";
-            py_check_items.push_back("是，更新到最新版本 " + newest);
-            py_check_items.push_back("重装当前版本 " + py_installed_max);
-            py_check_items.push_back("修复当前版本 " + py_installed_max +
-                                     "（优先使用已下载的安装包）");
-            py_check_items.push_back("手动选择其他版本");
+    fs::path inst_row_dir(const std::string& ver) const {
+        for (const InstRow& r : inst_rows)
+            if (r.version == ver) return su::utf8_to_wide(r.path);
+        return {};
+    }
+
+    // 后台检测：受管根目录扫描（注册表）+ 外部安装探测（注册表/环境变量/PATH）
+    void begin_inst_detect() {
+        if (inst_thread.joinable()) inst_thread.join();
+        inst_done = false;
+        inst_confirm = false;
+        inst_items.clear();
+        inst_actions.clear();
+        inst_detect_lang = inst_lang_id();
+        auto self = shared_from_this();
+        inst_thread = std::thread([self] {
+            std::vector<InstRow> rows;
+            std::error_code ec;
+            if (self->pymode) {
+                for (const std::wstring& r : platform::managed_get_roots("python")) {
+                    fs::path root(r);
+                    if (!fs::is_directory(root, ec)) continue;
+                    for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+                        if (!e.is_directory()) continue;
+                        std::string n = su::wide_to_utf8(e.path().filename().wstring());
+                        if (n == "current" || n == "archives" || (!n.empty() && n[0] == '_'))
+                            continue;
+                        if (!fs::exists(e.path() / L"python.exe", ec)) continue;
+                        rows.push_back({n, su::wide_to_utf8(e.path().wstring()), true});
+                    }
+                }
+                for (const py::InstalledPy& p : py::detect_installed()) {
+                    bool dup = false;
+                    for (const InstRow& r : rows)
+                        if (su::lower(su::utf8_to_wide(r.path)) == su::lower(p.path)) {
+                            dup = true;
+                            break;
+                        }
+                    if (!dup) rows.push_back({p.version, su::wide_to_utf8(p.path), false});
+                }
+            } else if (self->sdk_provider) {
+                auto insts = prov::managed_installs(*self->sdk_provider);
+                for (auto& [ver, dir] : insts)
+                    rows.push_back({ver, su::wide_to_utf8(dir.wstring()), true});
+                // 外部安装：环境变量优先，其次 PATH 探测
+                const std::string id = self->sdk_id;
+                fs::path exe;
+                wchar_t envbuf[MAX_PATH * 2] = {};
+                const wchar_t* envname = id == "jdk"   ? L"JAVA_HOME"
+                                         : id == "go"  ? L"GOROOT"
+                                         : id == "dotnet" ? L"DOTNET_ROOT"
+                                                         : nullptr;
+                if (envname && GetEnvironmentVariableW(envname, envbuf, MAX_PATH * 2)) {
+                    fs::path home(envbuf);
+                    exe = id == "jdk" ? home / L"bin" / L"java.exe"
+                          : id == "go" ? home / L"bin" / L"go.exe"
+                                       : home / L"dotnet.exe";
+                }
+                const wchar_t* exe_name = id == "jdk"   ? L"java.exe"
+                                          : id == "go"  ? L"go.exe"
+                                          : id == "dotnet" ? L"dotnet.exe"
+                                                          : L"node.exe";
+                if (!fs::is_regular_file(exe, ec)) exe = platform::find_in_path(exe_name);
+                if (!exe.empty() && fs::is_regular_file(exe, ec)) {
+                    fs::path home =
+                        id == "jdk" ? exe.parent_path().parent_path() : exe.parent_path();
+                    bool dup = false;
+                    for (const InstRow& r : rows)
+                        if (path_under(exe, su::utf8_to_wide(r.path)) ||
+                            path_under(home, su::utf8_to_wide(r.path))) {
+                            dup = true;
+                            break;
+                        }
+                    if (!dup) {
+                        std::wstring flag = id == "jdk" ? L"-version" : L"--version";
+                        std::string line = platform::capture_first_line(exe, flag);
+                        std::string ver = extract_ver_token(id, line);
+                        if (!ver.empty())
+                            rows.push_back({ver, su::wide_to_utf8(home.wstring()), false});
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lk(self->wmu);
+                self->inst_rows = std::move(rows);
+            }
+            self->inst_done = true;
+            if (!self->exiting) self->screen.PostEvent(Event::Custom);
+        });
+    }
+    void finish_inst_detect() {
+        if (inst_thread.joinable()) inst_thread.join();
+        rebuild_inst_items();
+    }
+
+    void rebuild_inst_items() {
+        inst_sel = 0;
+        inst_items.clear();
+        inst_actions.clear();
+        if (!inst_confirm) {
+            inst_items.push_back("安装新版本…");
+            inst_actions.push_back({IA_INSTALL, 0});
+            std::string latest;
+            if (pymode && !py_versions.empty()) latest = py_versions[0].version;
+            if (!pymode && !sdk_versions.empty()) latest = sdk_versions[0].id;
+            std::string max_ver = inst_managed_max();
+            if (!latest.empty() && !max_ver.empty()) {
+                bool show = ver_natural_cmp(max_ver, latest) < 0;
+                // dotnet 版本目录为补丁版本号（如 8.0.425），latest 为通道号（如 8.0）：
+                // 同通道内可能有新补丁，始终提供“更新”入口（确认页显示真实补丁版本）
+                if (!show && !pymode && sdk_id == "dotnet" &&
+                    (su::starts_with(max_ver, latest + ".") || max_ver == latest))
+                    show = true;
+                if (show) {
+                    inst_items.push_back("更新到最新版 " + latest + "（当前 " + max_ver + "）");
+                    inst_actions.push_back({IA_UPDATE, 0});
+                }
+            }
+            for (size_t i = 0; i < inst_rows.size(); ++i) {
+                if (!inst_rows[i].managed) continue;
+                inst_items.push_back("卸载 " + inst_rows[i].version + "（" +
+                                     inst_rows[i].path + "）");
+                inst_actions.push_back({IA_UNINSTALL, i});
+            }
+            inst_items.push_back("返回");
+            inst_actions.push_back({IA_BACK, 0});
         } else {
-            py_check_title = "已安装最新版本：" + py_installed_max;
-            py_check_items.push_back("重装 " + py_installed_max +
-                                     "（删除旧压缩包，重新下载并覆盖安装）");
-            py_check_items.push_back("修复 " + py_installed_max +
-                                     "（优先使用已下载的安装包，覆盖安装）");
-            py_check_items.push_back("手动选择其他版本");
+            inst_items.push_back("[确认] 卸载 " + inst_confirm_ver +
+                                 "（删除 " + su::wide_to_utf8(inst_confirm_dir.wstring()) + "）");
+            inst_actions.push_back({IA_UNINSTALL, (size_t)-1});
+            inst_items.push_back("[取消] 返回");
+            inst_actions.push_back({IA_BACK, 0});
         }
     }
-    void py_check_accept() {
-        if (py_check_items.empty()) return;
-        std::string newest = py_versions.empty() ? std::string() : py_versions[0].version;
-        const std::string& chosen = py_check_items[py_check_sel];
-        if (chosen.find("手动选择") != std::string::npos) {
-            enter(S_PyVersion);
+
+    void inst_accept() {
+        if (inst_actions.empty() || inst_sel < 0 ||
+            inst_sel >= (int)inst_actions.size())
+            return;
+        int act = inst_actions[(size_t)inst_sel].first;
+        size_t idx = inst_actions[(size_t)inst_sel].second;
+        if (act == IA_INSTALL) {
+            inst_confirm = false;
+            logx::linef("用户选择: 安装新版本（%s）", inst_lang_disp().c_str());
+            if (pymode) go(S_PyVersion);
+            else go(S_SdkVersion);
             return;
         }
-        std::string target;
-        if (chosen.find("更新到最新") != std::string::npos) {
-            target = newest;
-            py_repair = false;
-        } else if (chosen.find("重装") != std::string::npos) {
-            target = py_installed_max;
-            py_repair = false;
-        } else { // 修复
-            target = py_installed_max;
-            py_repair = true;
+        if (act == IA_UPDATE) {
+            std::string latest, max_ver = inst_managed_max();
+            if (pymode) latest = py_versions.empty() ? std::string() : py_versions[0].version;
+            else latest = sdk_versions.empty() ? std::string() : sdk_versions[0].id;
+            fs::path ver_dir = inst_row_dir(max_ver);
+            if (latest.empty() || ver_dir.empty()) return;
+            fs::path root = ver_dir.parent_path();
+            logx::linef("用户选择: 更新 %s → %s（根目录 %s）", max_ver.c_str(),
+                        latest.c_str(), su::wide_to_utf8(root.wstring()).c_str());
+            s.dir = root;
+            s.dir_set = true;
+            s.path_input = w(root);
+            if (pymode) {
+                py_ver = latest;
+                py_repair = false;
+                if (!pick_py_file(latest)) return;
+                go(S_PyConfirm);
+            } else {
+                std::string err;
+                prov::Artifact f;
+                if (!sdk_provider->resolve(latest, f, err)) {
+                    sdk_screen_err = err;
+                    return;
+                }
+                sdk_file = f;
+                go(S_SdkConfirm);
+            }
+            return;
         }
-        // 解析该版本的 Windows 安装器/压缩包
-        py_ver = target;
+        if (act == IA_UNINSTALL) {
+            if (!inst_confirm) {
+                if (idx >= inst_rows.size()) return;
+                inst_confirm = true;
+                inst_confirm_ver = inst_rows[idx].version;
+                inst_confirm_dir = su::utf8_to_wide(inst_rows[idx].path);
+                logx::linef("用户选择: 卸载 %s %s（待确认）", inst_lang_disp().c_str(),
+                            inst_confirm_ver.c_str());
+                rebuild_inst_items();
+                return;
+            }
+            inst_confirm = false;
+            std::string ver = inst_confirm_ver;
+            fs::path ver_dir = inst_confirm_dir;
+            start_uninstall_work(ver, ver_dir);
+            return;
+        }
+        // IA_BACK
+        if (inst_confirm) {
+            inst_confirm = false;
+            rebuild_inst_items();
+            return;
+        }
+        back();
+    }
+
+    // 为指定 Python 版本挑选最佳 Windows 安装文件（exe 优先，其次 msi/embed zip）
+    bool pick_py_file(const std::string& target) {
         std::vector<py::PyFile> files;
         std::string err;
         if (!py::fetch_files_ftp(target, "", files, err) || files.empty()) {
             py_screen_err = "未找到 " + target + " 的安装文件：" + err;
-            return;
+            return false;
         }
         std::string arch = py::detect_host_arch();
         const py::PyFile* best = nullptr;
@@ -1579,15 +2008,55 @@ struct AppState : std::enable_shared_from_this<AppState> {
             std::string l = su::lower(f.filename);
             bool installer = su::ends_with(l, ".exe") || su::ends_with(l, ".msi");
             bool embed = l.find("embed") != std::string::npos && su::ends_with(l, ".zip");
-            if (installer) { best = &f; break; }
+            if (installer) {
+                best = &f;
+                break;
+            }
             if (embed && !best) best = &f;
         }
         if (!best) {
             py_screen_err = "版本 " + target + " 没有 Windows " + arch + " 安装包";
-            return;
+            return false;
         }
         py_file = *best;
-        go(S_Path);
+        return true;
+    }
+
+    // 卸载（后台执行）：删除版本目录 + junction 维护 + PATH/受管记录清理
+    void start_uninstall_work(const std::string& ver, const fs::path& ver_dir) {
+        fs::path root = ver_dir.parent_path();
+        reset_work("正在卸载 " + inst_lang_disp() + " " + ver);
+        {
+            std::lock_guard<std::mutex> lk(wmu);
+            w_file = su::wide_to_utf8(ver_dir.wstring());
+            w_note = "正在删除版本目录并维护 junction / PATH …";
+        }
+        w_kind = 4;
+        bool py = pymode;
+        auto self = shared_from_this();
+        w_thread = std::thread([self, py, ver, root, ver_dir] {
+            std::string err;
+            bool ok = false;
+            if (py) ok = uninstall_python_version(root, ver, err);
+            else if (self->sdk_provider)
+                ok = prov::uninstall_version(*self->sdk_provider, root, ver, err);
+            else err = "内部错误：未知卸载目标";
+            std::lock_guard<std::mutex> lk(self->wmu);
+            if (ok) {
+                self->uninstall_lines.clear();
+                self->uninstall_lines.push_back("√ 已卸载 " + self->inst_lang_disp() + " " + ver);
+                self->uninstall_lines.push_back("  原位置: " + su::wide_to_utf8(ver_dir.wstring()));
+                self->uninstall_lines.push_back(
+                    "  current junction / PATH / 受管记录已同步维护；剩余版本自动接管 current");
+                self->w_phase = 1;
+            } else {
+                self->w_phase = 2;
+                self->w_err = err;
+            }
+            self->w_finished = true;
+            if (!self->exiting) self->screen.PostEvent(Event::Custom);
+        });
+        go(S_Work);
     }
     std::map<std::string, py::PyApiMeta> py_api_meta;
     bool py_api_loaded = false;
@@ -1640,6 +2109,12 @@ struct AppState : std::enable_shared_from_this<AppState> {
 
     // ---------------- 导航 ----------------
     void go(int next) {
+        // 进入路径屏时预填该语言上次使用的根目录（未手动指定过路径时）
+        if (next == S_Path && !s.dir_set && s.path_input.empty()) {
+            std::wstring last = platform::managed_get_last_root(
+                pymode ? "python" : (sdk_id.empty() ? "rust" : sdk_id));
+            if (!last.empty()) s.path_input = su::wide_to_utf8(last);
+        }
         hist.push_back(step);
         enter(next);
     }
@@ -1659,11 +2134,9 @@ struct AppState : std::enable_shared_from_this<AppState> {
             case S_Version: rebuild_versions(); break;
             case S_Target: rebuild_targets(); break;
             case S_Package: rebuild_packages(); break;
-            case S_PyCheck:
-                begin_py_check();
-                break;
-            case S_SdkCheck:
-                begin_sdk_check();
+            case S_Installed:
+                begin_inst_detect();
+                begin_lists_for_installed(); // 后台拉取版本列表（快速更新项需要最新版本号）
                 break;
             case S_SdkVersion:
                 sdk_screen_err.clear();
@@ -1689,7 +2162,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             default: break;
         }
     }
-    // 第一个尚未确定的步骤（手动流程）
+    // 第一个尚未确定的步骤（手动流程）；路径预填该语言上次使用的根目录
     int first_unset() {
         if (!s.dir_set) return S_Path;
         if (!s.ver_set) return S_Version;
@@ -1699,24 +2172,66 @@ struct AppState : std::enable_shared_from_this<AppState> {
         return S_Confirm;
     }
 
-    // ---------------- 检查更新 ----------------
+    // 后台启动版本列表加载（已装检测屏的快速更新项需要最新版本号）
+    void begin_lists_for_installed() {
+        if (pymode) {
+            if (!py_manifest_ok && !py_manifest_loading && !py_manifest_done.load())
+                begin_py_manifest();
+        } else if (sdk_provider) {
+            if (sdk_versions_for != sdk_id) {
+                sdk_versions.clear();
+                sdk_query.clear();
+                sdk_sel = 0;
+                begin_sdk_load();
+            } else if (sdk_versions.empty() && !sdk_loading && !sdk_load_done.load()) {
+                begin_sdk_load();
+            }
+        }
+    }
+
+    // ---------------- 检查更新（Rust） ----------------
+    enum { UA_UPDATE = 0, UA_REINSTALL, UA_REPAIR, UA_MANUAL, UA_UNINSTALL };
+    std::vector<int> uc_actions; // 与 uc_items 一一对应
     void rebuild_updatecheck() {
         uc_sel = 0;
+        uc_actions.clear();
+        uc_items.clear();
         fs::path root = s.rustc_exe.parent_path().parent_path();
         SemVer cur = s.rust_ok ? parse_semver(s.installed_line) : SemVer{};
         SemVer lat = s.rp.all.empty() ? SemVer{} : parse_semver(s.rp.all[0].tag);
-        if (s.rust_ok && cur.ok && lat.ok && semver_cmp(cur, lat) < 0) {
+        if (!s.rp.all.empty() && s.rust_ok && cur.ok && lat.ok && semver_cmp(cur, lat) < 0) {
             uc_is_new = true;
             uc_title = "检测到新版本：" + lat.text + "（当前 " + cur.text + "，安装于 " + w(root) +
                        "）";
-            uc_items = {"是，更新到最新版本 " + s.rp.all[0].tag + "（自动配置，确认后开始）",
-                        "否，手动选择其他版本"};
+            uc_items.push_back("是，更新到最新版本 " + s.rp.all[0].tag + "（自动配置，确认后开始）");
+            uc_actions.push_back(UA_UPDATE);
+            uc_items.push_back("否，手动选择其他版本");
+            uc_actions.push_back(UA_MANUAL);
+        } else if (s.rust_ok && cur.ok) {
+            uc_is_new = false;
+            uc_title = "已安装 Rust：" + cur.text + "（安装于 " + w(root) + "）";
+            if (!s.rp.all.empty()) {
+                uc_items.push_back("修复 " + cur.text + "（一键本地秒修；无本地安装包时自动下载）");
+                uc_actions.push_back(UA_REPAIR);
+                uc_items.push_back("重装 " + cur.text + "（删除旧压缩包，重新下载并覆盖安装）");
+                uc_actions.push_back(UA_REINSTALL);
+            }
+            uc_items.push_back("手动选择其他版本");
+            uc_actions.push_back(UA_MANUAL);
+            if (rustup_managed) {
+                uc_items.push_back("（该 Rust 由 rustup 管理，卸载请使用 rustup，本工具不接管）");
+                uc_actions.push_back(-1);
+            } else {
+                uc_items.push_back("卸载当前 Rust 安装（删除 " + w(root) + " 并清理 PATH）");
+                uc_actions.push_back(UA_UNINSTALL);
+            }
         } else {
             uc_is_new = false;
-            uc_title = "已安装最新版本：" + cur.text + "（安装于 " + w(root) + "）";
-            uc_items = {"修复 " + cur.text + "（一键本地秒修；无本地安装包时自动下载）",
-                        "重装 " + cur.text + "（删除旧压缩包，重新下载并覆盖安装）",
-                        "手动选择其他版本"};
+            uc_title = s.rp.all.empty()
+                           ? "无法获取最新版本信息（离线或网络受限）"
+                           : "未检测到本机 Rust 安装";
+            uc_items.push_back("手动选择版本安装");
+            uc_actions.push_back(UA_MANUAL);
         }
     }
 
@@ -1745,20 +2260,55 @@ struct AppState : std::enable_shared_from_this<AppState> {
     }
 
     void uc_accept() {
-        if (uc_is_new) {
-            if (uc_sel == 0) {
-                logx::linef("用户选择: 更新到最新版本 %s", s.rp.all[0].tag.c_str());
-                auto_config(false);
-                go(S_Confirm);
-            } else {
-                logx::line("用户选择: 手动安装其他版本（先选版本，再设路径）");
-                go(S_Version);
-            }
+        if (uc_actions.empty() || uc_sel < 0 || uc_sel >= (int)uc_actions.size()) return;
+        int act = uc_actions[(size_t)uc_sel];
+        if (act < 0) return; // 不可用项（如 rustup 托管）
+        if (act == UA_UPDATE) {
+            logx::linef("用户选择: 更新到最新版本 %s", s.rp.all[0].tag.c_str());
+            auto_config(false);
+            go(S_Confirm);
             return;
         }
-        fs::path root = s.rustc_exe.parent_path().parent_path();
-        if (uc_sel == 0) { // 修复：一键本地秒修
+        if (act == UA_MANUAL) {
+            logx::line("用户选择: 手动安装其他版本（先选版本，再设路径）");
+            go(S_Version);
+            return;
+        }
+        if (act == UA_UNINSTALL) { // Rust 卸载（平铺布局特例）
+            fs::path root = s.rustc_exe.parent_path().parent_path();
+            logx::linef("用户选择: 卸载 Rust（%s）", w(root).c_str());
+            reset_work("正在卸载 Rust");
+            {
+                std::lock_guard<std::mutex> lk(wmu);
+                w_file = w(root);
+                w_note = "正在删除安装目录并清理 PATH / 受管记录 …";
+            }
+            w_kind = 5;
+            auto self = shared_from_this();
+            w_thread = std::thread([self, root] {
+                std::string err;
+                bool ok = uninstall_rust_root(root, err);
+                std::lock_guard<std::mutex> lk(self->wmu);
+                if (ok) {
+                    self->uninstall_lines.clear();
+                    self->uninstall_lines.push_back("√ 已卸载 Rust");
+                    self->uninstall_lines.push_back("  原位置: " + w(root));
+                    self->uninstall_lines.push_back("  PATH / 受管记录已清理");
+                    self->w_phase = 1;
+                } else {
+                    self->w_phase = 2;
+                    self->w_err = err;
+                }
+                self->w_finished = true;
+                if (!self->exiting) self->screen.PostEvent(Event::Custom);
+            });
+            go(S_Work);
+            return;
+        }
+        // 修复 / 重装（均需版本列表可用）
+        if (act == UA_REPAIR) {
             logx::line("用户选择: 修复");
+            fs::path root = s.rustc_exe.parent_path().parent_path();
             fs::path local = find_local_archive(root, s.rp.all[0].tag);
             if (!local.empty())
                 logx::linef("发现本地安装包: %s", w(local).c_str());
@@ -1767,18 +2317,16 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 s.repair = true;
                 s.local_archive = local;
                 go(S_RepairLocal);
-            } else { // 无本地包 → 自动配置，确认后自动下载
+            } else {
                 auto_config(true);
                 go(S_Confirm);
             }
-        } else if (uc_sel == 1) { // 重装
-            logx::line("用户选择: 重装");
-            auto_config(false);
-            go(S_Confirm);
-        } else {
-            logx::line("用户选择: 手动安装其他版本（先选版本，再设路径）");
-            go(S_Version);
+            return;
         }
+        // UA_REINSTALL
+        logx::line("用户选择: 重装");
+        auto_config(false);
+        go(S_Confirm);
     }
 
     // ---------------- 路径 ----------------
@@ -1795,6 +2343,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
         s.dir_set = true;
         logx::linef("目标目录: %s", w(p));
         logx::line("用户确认安装路径");
+        platform::managed_set_last_root(
+            pymode ? "python" : (sdk_id.empty() ? "rust" : sdk_id), p); // 记住该语言根目录
         if (pymode) go(S_PyConfirm);
         else if (!sdk_id.empty()) go(S_SdkConfirm);
         else go(s.ver_set ? S_Target : S_Version);
@@ -2029,6 +2579,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             return;
         }
         refilter_py_versions();
+        if (step == S_Installed) rebuild_inst_items(); // 快速更新项依赖最新版本号
     }
     void refilter_py_versions() {
         py_ver_items.clear();
@@ -2118,8 +2669,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
         auto self = shared_from_this();
         py::PyFile f = py_file;
         fs::path dir = s.dir;
-        fs::path ver_dir = dir / "versions" / "python" / su::utf8_to_wide(py_ver);
-        fs::path py_current = dir / "python" / "current";
+        fs::path ver_dir = dir / su::utf8_to_wide(py_ver); // 统一布局：<目录>\<版本>
+        fs::path py_current = dir / L"current";
         fs::path archive = dir / su::utf8_to_wide(f.filename);
         bool repair = py_repair;
         bool do_install = cb_install;
@@ -2227,6 +2778,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
                     platform::add_path_dir(py_current / L"Scripts", perr))
                     self->s.path_added = true;
             }
+            platform::managed_add_root("python", dir); // 记录受管安装（供检测/卸载）
             {
                 std::lock_guard<std::mutex> lk(self->wmu);
                 self->w_outcome = out;
@@ -2237,91 +2789,6 @@ struct AppState : std::enable_shared_from_this<AppState> {
         });
         go(S_Work);
     }
-    void begin_sdk_check() {
-        sdk_check_sel = 0;
-        sdk_check_items.clear();
-        if (!sdk_provider) {
-            enter(S_SdkVersion);
-            return;
-        }
-        std::error_code ec;
-        fs::path root = s.dir;
-        std::string vexe = sdk_provider->verify_exe();
-        if (sdk_provider->multi_version()) {
-            fs::path base = root / "versions" / su::utf8_to_wide(sdk_id);
-            if (!fs::is_directory(base, ec)) {
-                enter(S_SdkVersion);
-                return;
-            }
-            for (const fs::directory_entry& e : fs::directory_iterator(base)) {
-                if (!e.is_directory()) continue;
-                if (!fs::exists(e.path() / su::utf8_to_wide(vexe), ec)) continue;
-                std::string name = su::wide_to_utf8(e.path().filename().wstring());
-                sdk_installed_max = name;
-                sdk_installed_display = name;
-            }
-        } else {
-            fs::path exe = root / su::utf8_to_wide(vexe);
-            if (!fs::exists(exe, ec)) {
-                enter(S_SdkVersion);
-                return;
-            }
-            std::string vline = platform::capture_first_line(exe, L"--version");
-            std::string ver = vline;
-            if (sdk_id == "go") {
-                size_t p1 = vline.find("go");
-                size_t p2 = p1 == std::string::npos ? std::string::npos : vline.find(' ', p1);
-                ver = vline.substr(p1, p2 == std::string::npos ? std::string::npos
-                                                               : p2 - p1);
-            } else if (sdk_id == "dotnet") {
-                size_t p2 = vline.rfind(' ');
-                ver = p2 == std::string::npos ? vline : vline.substr(p2 + 1);
-            }
-            sdk_installed_max = ver;
-            sdk_installed_display = ver;
-        }
-        std::string newest_id = sdk_versions.empty() ? std::string() : sdk_versions[0].id;
-        bool up_to_date = false;
-        for (const prov::VersionInfo& v : sdk_versions)
-            if (v.id == sdk_installed_max) up_to_date = true;
-        if (up_to_date) {
-            sdk_check_title = "已安装最新版本：" + sdk_installed_max;
-            sdk_check_items.push_back("重装 " + sdk_installed_max +
-                                      "（删除旧压缩包，重新下载并覆盖安装）");
-            sdk_check_items.push_back("修复 " + sdk_installed_max +
-                                      "（优先使用已下载的安装包，覆盖安装）");
-            sdk_check_items.push_back("手动选择其他版本");
-        } else {
-            sdk_check_title = "检测到新版本：" + newest_id + "（当前 " + sdk_installed_max +
-                              "）";
-            sdk_check_items.push_back("是，更新到最新版本 " + newest_id);
-            sdk_check_items.push_back("重装当前版本 " + sdk_installed_max);
-            sdk_check_items.push_back("修复当前版本 " + sdk_installed_max +
-                                      "（优先使用已下载的安装包）");
-            sdk_check_items.push_back("手动选择其他版本");
-        }
-    }
-    void sdk_check_accept() {
-        if (sdk_check_items.empty()) return;
-        const std::string& chosen = sdk_check_items[sdk_check_sel];
-        std::string err;
-        if (chosen.find("手动选择") != std::string::npos) {
-            enter(S_SdkVersion);
-            return;
-        }
-        sdk_repair = chosen.find("修复") != std::string::npos;
-        std::string target_id =
-            chosen.find("更新到最新") != std::string::npos
-                ? (sdk_versions.empty() ? std::string() : sdk_versions[0].id)
-                : sdk_installed_max;
-        if (!sdk_provider->resolve(target_id, sdk_file, err)) {
-            sdk_screen_err = err;
-            enter(S_SdkVersion);
-            return;
-        }
-        go(S_Path);
-    }
-    bool p_multi(const std::string& id) { return id == "jdk"; }
 
     // ---------------- SDK 管理（Node/JDK/Go/.NET，经 Provider 接口） ----------------
     void begin_sdk_load() {
@@ -2346,6 +2813,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         sdk_loading = false;
         if (!sdk_versions.empty()) refilter_sdk_versions();
         else sdk_screen_err = sdk_err;
+        if (step == S_Installed) rebuild_inst_items(); // 快速更新项依赖最新版本号
     }
     void refilter_sdk_versions() {
         sdk_items.clear();
@@ -2461,7 +2929,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             // pnpm/yarn（经 Corepack，全局）→ 存储位置规范化 → 检测报告
             std::vector<std::string> tool_lines;
             if (is_node) {
-                fs::path nd = root; // node 平铺安装，node 目录即安装根目录
+                fs::path nd = root / su::utf8_to_wide(f.version); // 版本目录（node.exe 所在）
                 {
                     std::lock_guard<std::mutex> lk(self->wmu);
                     self->w_note = "正在配置工具链（Corepack / pnpm / 存储位置）…";
@@ -2662,6 +3130,15 @@ struct AppState : std::enable_shared_from_this<AppState> {
     void work_finish_transition() {
         int ph = w_phase.load();
         logx::linef("工作流结束（结果: %s）", ph == 1 ? "成功" : ph == 3 ? "已取消" : "失败");
+        if (w_kind == 4 || w_kind == 5) { // 卸载（Python/SDK / Rust）
+            if (ph == 1) {
+                go(S_Done);
+            } else {
+                inst_confirm = false;
+                back(); // 返回检测屏/检查更新屏
+            }
+            return;
+        }
         if (w_kind == 3) { // SDK
             if (ph == 1) {
                 s.path_added = cb_path || s.path_added;
@@ -2717,22 +3194,23 @@ struct AppState : std::enable_shared_from_this<AppState> {
     // 完成页文案
     std::vector<std::string> done_lines() {
         std::vector<std::string> v;
+        if (w_kind == 4 || w_kind == 5) return uninstall_lines; // 卸载结果
         if (!sdk_id.empty() && sdk_provider) {
-            fs::path ready = sdk_provider->multi_version()
-                                 ? s.dir / su::utf8_to_wide(sdk_id) / L"current"
-                                 : s.dir; // node 平铺安装，根目录即 node 目录
+            fs::path ready = s.dir / L"current"; // 统一多版本布局：<root>\<版本>
             v.push_back("√ " + sdk_provider->display() + " " + sdk_file.version +
-                        " 就绪: " + w(ready));
+                        " 就绪: " + w(ready) + "（→ " +
+                        w(s.dir / su::utf8_to_wide(sdk_file.version)) + "）");
             if (!sdk_verify_line.empty()) v.push_back(sdk_verify_line);
             for (const std::string& l : sdk_tool_lines) v.push_back(l);
             if (s.path_added) v.push_back("√ 已加入 PATH/环境变量（重新打开终端后生效）");
             return v;
         }
         if (pymode) {
-            v.push_back("√ Python 就绪: " + w(s.dir));
+            v.push_back("√ Python 就绪: " + w(s.dir / L"current") + "（→ " +
+                        w(s.dir / su::utf8_to_wide(py_ver)) + "）");
             if (!py_verify_line.empty()) v.push_back(py_verify_line);
             if (s.path_added) v.push_back("√ 已加入用户 PATH（重新打开终端后生效）");
-            v.push_back("python.exe 位于 " + w(s.dir));
+            v.push_back("python.exe 位于 " + w(s.dir / su::utf8_to_wide(py_ver)));
             return v;
         }
         v.push_back("√ " + std::string(s.format == "msi" ? "下载完成" : "安装完成") + ": " +
@@ -2746,16 +3224,24 @@ struct AppState : std::enable_shared_from_this<AppState> {
         return v;
     }
 
-    // 完成页 Esc：重置选择，回到路径屏重新开始
+    // 完成页 Esc：重置选择，回到检测屏/路径屏
     void done_reset() {
         logx::line("用户返回主界面，重置选择");
+        if (w_kind == 4 || w_kind == 5) { // 卸载完成 → 回到选择管理目标
+            hist.clear();
+            sdk_id.clear();
+            sdk_provider.reset();
+            pymode = false;
+            enter(S_Choose);
+            return;
+        }
         if (!sdk_id.empty()) {
             sdk_query.clear();
             sdk_verify_line.clear();
             sdk_tool_lines.clear();
             sdk_file = prov::Artifact{};
             refilter_sdk_versions();
-            enter(S_SdkVersion);
+            enter(S_Installed); // 回到已装检测（含最新状态）
             return;
         }
         if (pymode) {
@@ -2763,7 +3249,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             py_file = py::PyFile{};
             py_query.clear();
             py_verify_line.clear();
-            enter(S_PyVersion);
+            enter(S_Installed);
             return;
         }
         if (s.opt.version.empty()) {
@@ -3023,12 +3509,6 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         return window(text("安装结果"), vbox(std::move(v)));
     });
 
-    // ---- 检测屏菜单 ----
-    Component py_check_menu = make_menu(&st->py_check_items, &st->py_check_sel,
-                                        [st] { st->py_check_accept(); });
-    Component sdk_check_menu = make_menu(&st->sdk_check_items, &st->sdk_check_sel,
-                                         [st] { st->sdk_check_accept(); });
-
     // ---- 管理目标 ----
     Component ch_menu_c = make_menu(&st->ch_items, &st->ch_sel, [st] {
         static const char* kSdkIds[] = {"", "", "node", "jdk", "go", "dotnet"};
@@ -3038,14 +3518,14 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         } else if (st->ch_sel == 1) {
             st->pymode = true;
             logx::line("用户选择: 管理 Python");
-            st->enter(S_PyVersion); // 清单就绪后自动进入检测屏
+            st->go(S_Installed); // 已安装检测（自动检测 + 显示位置 + 更新/卸载）
         } else {
             st->pymode = false;
             st->sdk_provider = prov::Registry::instance().create(kSdkIds[st->ch_sel]);
             if (!st->sdk_provider) return;
             st->sdk_id = st->sdk_provider->id();
             logx::linef("用户选择: 管理 %s", st->sdk_provider->display().c_str());
-            st->go(S_SdkVersion);
+            st->go(S_Installed);
         }
     });
     Component choose_screen = Renderer(ch_menu_c, [st, ch_menu_c]() -> Element {
@@ -3054,7 +3534,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         v.push_back(text(""));
         v.push_back(ch_menu_c->Render());
         v.push_back(text(""));
-        v.push_back(text("支持多版本管理与 current 切换（Python / JDK）") | dim);
+        v.push_back(text("统一多版本布局 <安装目录>\\<版本>，current junction 切换当前版本") | dim);
         return window(text("选择管理目标"), vbox(std::move(v)));
     });
 
@@ -3219,16 +3699,14 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         Element p_line =
             st->cb_path ? text("[√] 写入 PATH 与环境变量   （P 切换）") | color(Color::Green)
                         : text("[ ] 写入 PATH 与环境变量   （P 切换）");
-        bool multi = st->sdk_provider && st->sdk_provider->multi_version();
         std::wstring layout =
-            st->s.dir.wstring() +
-            (multi ? L"\\versions\\<sdk>\\<版本>，current 为 junction" : L"（平铺单目录）");
+            st->s.dir.wstring() + L"\\<版本>，current junction 指向当前版本";
         Elements rows = {
             text("目标     : " + (st->sdk_provider ? st->sdk_provider->display() : st->sdk_id)),
             text("版本     : " + st->sdk_file.version),
             text("文件     : " + st->sdk_file.filename),
             text("校验     : " + std::string(!st->sdk_file.sha256.empty() ? "SHA-256" : "下载完整性")),
-            text("模式     : " + std::string(multi ? "多版本目录 + current junction" : "平铺单目录")),
+            text("模式     : 多版本目录 <安装目录>\\<版本> + current junction"),
             text("根目录   : " + w(st->s.dir)),
             text("布局     : " + su::wide_to_utf8(layout)),
             text(""),
@@ -3261,22 +3739,38 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         return window(text("确认安装信息"), vbox(std::move(rows)));
     });
 
-    // ---- Python 检测屏 ----
-    Component pycheck_screen = Renderer([st, py_check_menu]() -> Element {
+    // ---- 已安装检测（统一：Python / SDK，自动检测 + 显示位置 + 更新/卸载） ----
+    auto inst_menu = make_menu(&st->inst_items, &st->inst_sel, [st] { st->inst_accept(); });
+    Component inst_screen = Renderer(inst_menu, [st, inst_menu]() -> Element {
         Elements v;
-        v.push_back(text(st->py_check_title) | bold);
+        std::string disp = st->inst_lang_disp();
+        if (st->inst_detect_lang != st->inst_lang_id() || st->inst_items.empty()) {
+            v.push_back(text("正在检测本机已安装的 " + disp + " …") | bold);
+            v.push_back(text(""));
+            v.push_back(text("（受管记录 · 注册表 · 环境变量 · PATH）") | dim);
+            return window(text("已安装检测 · " + disp), vbox(std::move(v)));
+        }
+        std::vector<AppState::InstRow> rows;
+        {
+            std::lock_guard<std::mutex> lk(st->wmu);
+            rows = st->inst_rows;
+        }
+        v.push_back(text("已安装列表（自动检测）：") | bold);
+        if (rows.empty()) v.push_back(text("  未检测到任何安装") | dim);
+        for (const auto& r : rows) {
+            std::string tag = r.managed ? "本工具管理" : "外部安装";
+            v.push_back(text("  " + r.version + "    " + r.path + "  [" + tag + "]") |
+                        (r.managed ? color(Color::Green) : color(Color::GrayLight)));
+        }
         v.push_back(text(""));
-        v.push_back(py_check_menu->Render());
-        return window(text("Python 已安装检测"), vbox(std::move(v)));
-    });
-
-    // ---- SDK 检测屏 ----
-    Component sdkcheck_screen = Renderer([st, sdk_check_menu]() -> Element {
-        Elements v;
-        v.push_back(text(st->sdk_check_title) | bold);
+        v.push_back(text("可执行操作："));
+        v.push_back(inst_menu->Render());
+        if (st->inst_confirm)
+            v.push_back(text("⚠ 卸载将删除整个版本目录且不可恢复，再次 Enter 确认") |
+                        color(Color::Yellow));
         v.push_back(text(""));
-        v.push_back(sdk_check_menu->Render());
-        return window(text("SDK 已安装检测"), vbox(std::move(v)));
+        v.push_back(text("U 重新检测 · Esc 返回") | dim);
+        return window(text("已安装检测 · " + disp), vbox(std::move(v)));
     });
 
     // ---- 屏幕容器（顺序与 StepIdx 一致，选择器即 Session::step）----
@@ -3298,12 +3792,12 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     screens.push_back(pyconfirm_screen); // S_PyConfirm
     screens.push_back(sdkver_screen);    // S_SdkVersion
     screens.push_back(sdkconfirm_screen); // S_SdkConfirm
-    screens.push_back(pycheck_screen);    // S_PyCheck
-    screens.push_back(sdkcheck_screen);   // S_SdkCheck
+    screens.push_back(inst_screen);       // S_Installed
     Component tab = Container::Tab(screens, &st->step);
 
     // ---- 全局事件 ----
     Component router = CatchEvent(tab, [st](Event e) {
+        if (e == Event::CtrlC) return true; // Ctrl+C：不退出（选中文字时由终端复制）
         // 本机工具链检测完成 → 任意事件时合并（防止循环启动前的 Custom 事件丢失）
         if (st->sdk_tools_ready.exchange(false)) st->finish_node_tools_probe();
         if (e == Event::Custom) {
@@ -3312,12 +3806,16 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             }
             if (st->ver_load_done.exchange(false)) st->finish_version_load();
             if (st->py_manifest_done.exchange(false)) st->finish_py_manifest();
-            if (st->py_check_pending.exchange(false)) {
-                st->py_check_pending = false;
-                st->go(S_PyCheck);
-            }
             if (st->sdk_load_done.exchange(false)) st->finish_sdk_load();
+            if (st->inst_done.exchange(false)) st->finish_inst_detect();
             return true;
+        }
+        if (st->step == S_Installed && e.is_character()) {
+            const std::string& ch = e.character();
+            if (ch == "u" || ch == "U") {
+                st->begin_inst_detect(); // 手动重新检测
+                return true;
+            }
         }
         if (st->step == S_Version) {
             // 即时搜索：直接打字过滤；W/S 或 ↑↓ 选择；Enter 确认
@@ -3580,8 +4078,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     Component layout = Renderer(router, [st, router]() -> Element {
         Element head = window(
             text(" Environ Manage（环境管理器）   By:Ming-QWQ520(明) "),
-            hbox({text(" 最新版本（Rust）: " +
-                       (st->s.rp.all.empty() ? "?" : st->s.rp.all[0].tag) + " ") | dim,
+            hbox({text(" 统一多版本布局: <安装目录>\\<版本> · Ctrl+C 复制选中文字 ") | dim,
                   filler(),
                   text(std::string(step_tag(st->step)) + " ") | dim}));
         Element foot =
@@ -3591,15 +4088,15 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
                      separator(), std::move(foot)});
     });
 
-    // 初始屏幕：--sdk → SDK 版本；--python → Python 版本；否则进入管理目标选择
+    // 初始屏幕：--sdk / --python → 已装检测；否则进入管理目标选择
     if (!s.opt.sdk.empty()) {
         st->sdk_provider = prov::Registry::instance().create(s.opt.sdk);
         st->sdk_id = s.opt.sdk;
         st->pymode = false;
-        st->enter(S_SdkVersion);
+        st->go(S_Installed);
     } else if (s.opt.python) {
         st->pymode = true;
-        st->enter(S_PyVersion);
+        st->go(S_Installed);
     } else {
         st->enter(S_Choose);
     }
@@ -3610,14 +4107,12 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
 inline int run_tui(const Options& opts) {
     Session s(opts);
 
+    // 版本列表仅 Rust 流程需要：拉取失败不再阻断 TUI（进入界面后相关功能可重试）
     std::string err;
     if (!s.rp.ensure(1, err)) {
-        printf("%s获取版本列表失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
-        return 1;
-    }
-    if (s.rp.all.empty()) {
-        printf("%sGitHub 上没有任何版本。%s\n", ui::kRed, ui::kReset);
-        return 1;
+        logx::line("启动时获取 Rust 版本列表失败（相关功能进入界面后可重试）: " + err);
+        s.rp.all.clear();
+        s.rp.end_of_list = false;
     }
 
     s.rustc_exe = find_installed_rust(s.installed_line);
@@ -3663,7 +4158,10 @@ inline int run_tui(const Options& opts) {
     auto screen = ScreenInteractive::Fullscreen();
     auto sp_s = std::make_shared<Session>(std::move(s));
     Component app = build_app(sp_s, screen);
+    // 忽略 Ctrl+C 控制台事件：未选中文字时不再直接退出，选中文字时由终端完成复制
+    SetConsoleCtrlHandler(nullptr, TRUE);
     screen.Loop(app);
+    SetConsoleCtrlHandler(nullptr, FALSE);
     return 0;
 }
 
@@ -3701,6 +4199,8 @@ int main() {
             rc = run_py_list();
         } else if (opts.sdk_list) {
             rc = run_sdk_list(opts);
+        } else if (opts.uninstall && !interactive()) {
+            rc = run_uninstall_batch(opts);
         } else if (opts.python && !interactive()) {
             rc = run_py_batch(opts);
         } else if (!opts.sdk.empty() && !interactive()) {

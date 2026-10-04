@@ -6,9 +6,11 @@
 支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET** 六种环境的完整下载、校验、安装与多版本管理。
 
 - **双模式**：无参数启动即为全屏 TUI 交互界面；带参数则为非交互批处理（脚本/CI 可用）。
+- **统一多版本布局 + 全生命周期管理**：所有语言（Rust 除外）安装到 `<安装目录>\<版本>`
+  （如 `D:\Python\3.12.6\python.exe`），`<安装目录>\current` junction 指向当前版本；
+  自动检测已装版本与位置，支持安装/更新/卸载。
 - **国内网络友好**：GitHub API 经 gh-proxy 加速，安装包走中科大 / 上交 / 华为云 / npmmirror / 阿里云等镜像，失败自动切换，全程支持断点续传。
 - **完整性校验**：SHA-256 / MD5 校验和验证 + 下载字节数比对，校验和缺失时降级为大小校验。
-- **多版本共存**：SDK 采用 `versions\<sdk>\<版本>` 布局，`<sdk>\current` 目录 junction 指向当前版本，一条命令切换。
 
 ---
 
@@ -68,7 +70,12 @@ RustInstall.exe
 
 全屏 TUI：顶部为页眉（标题 / 作者 / 本机与最新版本状态），中部为当前步骤面板，
 底部为键位提示栏。启动后先选择管理目标（Rust / Python / Node.js / JDK / Go / .NET），
-再按"安装路径 → 选择版本 → 确认 → 下载安装 → 完成结果"逐步进行。
+随后自动检测本机已装版本并显示安装位置（Python / Node.js / JDK / Go / .NET 走
+"已安装检测"屏，可执行安装/更新/卸载；Rust 走"检查更新"屏），再按
+"安装路径 → 选择版本 → 确认 → 下载安装 → 完成结果"逐步进行。
+
+> **Ctrl+C 复制**：TUI 中选中文字后按 Ctrl+C 由终端完成复制（QuickEdit），未选中时
+> 不会退出程序；退出请用 Esc（返回上一步）或完成页 Enter。
 
 - `↑↓` 或 `W/S`：移动选择
 - `←→` 或 `A/D`：版本列表翻页（按需加载，可一直翻到最老版本）
@@ -117,7 +124,12 @@ SDK 管理（多版本 + current junction）:
       --with-yarn          node 安装后经 Corepack 全局安装 yarn
       --corepack <开关>    enable（默认，启用 Corepack 管理 pnpm/yarn）/ disable
       --pnpm-home <目录>   pnpm/npm 存储根目录（默认 <目录>\pnpm-repository）
-      布局: <目录>\versions\<sdk>\<版本>，<目录>\<sdk>\current 指向当前版本
+      布局: <目录>\<版本>，<目录>\current junction 指向当前版本
+
+卸载（批处理；多语言统一布局 <目录>\<版本>）:
+      --uninstall [版本|all]
+                           卸载受管安装（配合 --sdk <id> / --python；Rust 直接
+                           --uninstall all）
 ```
 
 示例：
@@ -205,9 +217,12 @@ RustInstall.exe --sdk dotnet --sdk-list
 - **校验**：优先 SHA-256 → MD5（旧版本）→ 下载完整性（Content-Length 比对）
 - **下载镜像**：官方 / 华为云 / npmmirror（国内镜像挂载点无 `ftp/` 前缀，已自动映射），
   支持断点续传与自动切换
-- **管理**：exe 静默安装（`/quiet InstallAllUsers=0 TargetDir=... PrependPath=...`），
-  zip 解压（embed 嵌入式包），安装后 `python.exe --version` 验证；已安装检测扫描
-  注册表 `PythonCore`（HKLM/HKCU）
+- **管理**：exe 静默安装（`/quiet InstallAllUsers=0 TargetDir=<安装目录>\<版本>`），zip 解压
+  （embed 嵌入式包），安装后 `python.exe --version` 验证；统一多版本布局
+  `<安装目录>\<版本>` + `<安装目录>\current` junction，PATH 加入 `current` 与 `current\Scripts`
+- **检测 / 更新 / 卸载**：自动扫描受管根目录（含版本与位置）+ 注册表 `PythonCore`
+  （HKLM/HKCU）探测外部安装并标注来源；支持一键更新到最新（旧版本保留共存）与按版本卸载
+  （current 自动切换到剩余的最近版本，全部卸完后清理 PATH 与受管记录）
 
 ---
 
@@ -219,15 +234,19 @@ TUI 选择目标或 `--sdk <id>` 进入，四个 SDK 走统一的 Provider 接�
 
 | SDK | 版本源 | 支持标签 | 安装后 |
 | --- | --- | --- | --- |
-| Node.js | `nodejs.org/dist/index.json`（npmmirror 镜像同格式） | `lts` 字段：字符串 → **LTS · 代号**（如 Krypton）；false → Current | zip 解压到 `versions\node\<版本>`，exe 在根目录 |
-| JDK (Temurin) | Adoptium v3 `available_releases` + `feature_releases/<major>/ga` | API 的 LTS 大版本表 → **LTS**，其余功能版 | `versions\jdk\<release_name>`，`JAVA_HOME` 指向 current |
-| Go | `go.dev/dl/?mode=json&include=all`（golang.google.cn / 阿里云镜像同路径） | 无 LTS：最新两个 minor → **Supported**，其余 **EOL** | `versions\go\<版本>`（顶层 `go/` 自动合并），`GOROOT` 指向 current |
-| .NET | `builds.dotnet.microsoft.com` 的 `release-metadata/releases-index.json`（带 BOM，自动剥离） | `support-phase`/`release-type` → **LTS / STS / EOL / Preview** | `versions\dotnet\<SDK 版本>`（扁平结构），`DOTNET_ROOT` 指向 current |
+| Node.js | `nodejs.org/dist/index.json`（npmmirror 镜像同格式） | `lts` 字段：字符串 → **LTS · 代号**（如 Krypton）；false → Current | zip 解压到 `\<版本>`，exe 在版本目录根 |
+| JDK (Temurin) | Adoptium v3 `available_releases` + `feature_releases/<major>/ga` | API 的 LTS 大版本表 → **LTS**，其余功能版 | `\<release_name>`，`JAVA_HOME` 指向 current |
+| Go | `go.dev/dl/?mode=json&include=all`（golang.google.cn / 阿里云镜像同路径） | 无 LTS：最新两个 minor → **Supported**，其余 **EOL** | `\<版本>`（顶层 `go/` 自动合并），`GOROOT` 指向 current |
+| .NET | `builds.dotnet.microsoft.com` 的 `release-metadata/releases-index.json`（带 BOM，自动剥离） | `support-phase`/`release-type` → **LTS / STS / EOL / Preview** | `\<SDK 版本>`（扁平结构），`DOTNET_ROOT` 指向 current |
 
-- **多版本布局**：`<目录>\versions\<sdk>\<版本>`；`<目录>\<sdk>\current` 为目录 junction
-  （`mklink /J`，无需管理员），指向当前版本
-- **PATH**：加入 `<目录>\<sdk>\current[\<bin>]`；JDK 另设 `JAVA_HOME`、Go 设 `GOROOT`、
+- **多版本布局（统一）**：`<安装目录>\<版本>`；`<安装目录>\current` 为目录 junction
+  （`mklink /J`，无需管理员），指向当前版本（Python / Node.js / JDK / Go / .NET 一致）
+- **PATH**：加入 `<安装目录>\current[\<bin>]`；JDK 另设 `JAVA_HOME`、Go 设 `GOROOT`、
   .NET 设 `DOTNET_ROOT` 与 `DOTNET_CLI_TELEMETRY_OPTOUT=1`
+- **检测 / 更新 / 卸载**：进入目标环境后自动扫描已装版本与位置（本工具受管记录 +
+  注册表 / 环境变量 / PATH 探测外部安装），可一键更新到最新（新版本写入独立版本目录后
+  切换 current，旧版本保留）、按版本卸载（删除版本目录 + 自动重指 current，
+  全部卸完后清理 PATH/环境变量/受管记录）；批处理用 `--uninstall [版本|all]`
 - **校验**：Node 用 `SHASUMS256.txt`；JDK 用 API 自带的 SHA-256；Go 用 `files.sha256`；
   .NET 无校验和，由下载字节数与 `Content-Length` 比对保证
 - **镜像**：Node 走 npmmirror、Go 走阿里云/国内官方、JDK 的 GitHub 直链走 gh-proxy 加速，

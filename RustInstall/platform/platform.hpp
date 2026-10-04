@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "logger.hpp"
 #include "strutil.hpp"
@@ -192,6 +193,248 @@ inline std::string capture_first_line(const fs::path& exe, const std::wstring& a
     CloseHandle(pi.hProcess);
     size_t end = out.find('\n');
     return su::trim(out.substr(0, end == std::string::npos ? out.size() : end));
+}
+
+// 从用户 PATH 移除目录（大小写不敏感、忽略末尾反斜杠）；整值为空时删除 Path 值
+inline bool remove_path_dir(const fs::path& dir, std::string& err) {
+    HKEY key = nullptr;
+    LONG rc = RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0,
+                            KEY_QUERY_VALUE | KEY_SET_VALUE, &key);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 HKCU\\Environment 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    std::wstring cur;
+    DWORD type = 0, size = 0;
+    rc = RegQueryValueExW(key, L"Path", nullptr, &type, nullptr, &size);
+    if (rc == ERROR_SUCCESS && size > 0) {
+        cur.resize(size / 2);
+        RegQueryValueExW(key, L"Path", nullptr, &type, (BYTE*)cur.data(), &size);
+        while (!cur.empty() && cur.back() == L'\0') cur.pop_back();
+    }
+    RegCloseKey(key);
+
+    // 规范比较：小写 + 去末尾反斜杠
+    auto norm = [](std::wstring s) {
+        s = su::lower(su::trim(s));
+        while (!s.empty() && s.back() == L'\\') s.pop_back();
+        return s;
+    };
+    std::wstring want = norm(dir.wstring());
+    std::vector<std::wstring> keep;
+    bool removed = false;
+    size_t pos = 0;
+    while (pos <= cur.size()) {
+        size_t next = cur.find(L';', pos);
+        std::wstring item = su::trim(
+            cur.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+        if (!item.empty()) {
+            if (norm(item) == want) removed = true; // 丢弃匹配项
+            else keep.push_back(item);
+        }
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    if (!removed) {
+        logx::line("PATH 中未找到该目录，无需移除");
+        return true;
+    }
+    std::wstring joined;
+    for (size_t i = 0; i < keep.size(); ++i) {
+        if (i) joined += L";";
+        joined += keep[i];
+    }
+    key = nullptr;
+    rc = RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_SET_VALUE, &key);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 HKCU\\Environment 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    if (joined.empty()) {
+        RegDeleteValueW(key, L"Path");
+    } else {
+        rc = RegSetValueExW(key, L"Path", 0, REG_EXPAND_SZ, (const BYTE*)joined.c_str(),
+                            (DWORD)((joined.size() + 1) * sizeof(wchar_t)));
+    }
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS && !joined.empty()) {
+        err = "写回用户 PATH 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    DWORD_PTR resp = 0;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment",
+                        SMTO_ABORTIFHUNG, 3000, &resp);
+    logx::linef("已从用户 PATH 移除: %s", su::wide_to_utf8(dir.wstring()).c_str());
+    return true;
+}
+
+// 删除用户环境变量（HKCU\Environment），并广播变更；不存在视为成功
+inline bool remove_user_env(const std::string& name, std::string& err) {
+    HKEY key = nullptr;
+    LONG rc = RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_SET_VALUE, &key);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 HKCU\\Environment 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    rc = RegDeleteValueW(key, su::utf8_to_wide(name).c_str());
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND) {
+        err = "删除环境变量 " + name + " 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    DWORD_PTR resp = 0;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"Environment",
+                        SMTO_ABORTIFHUNG, 3000, &resp);
+    logx::linef("已删除环境变量 %s", name.c_str());
+    return true;
+}
+
+// ------------------------------------------------------- 受管安装记录（HKCU\Software\EnvironManage）
+//
+// 每种语言一个子键：<lang>（rust/python/node/jdk/go/dotnet）
+//   roots     REG_MULTI_SZ  受本工具管理的安装根目录（统一布局 <root>\<版本> + <root>\current）
+//   last_root REG_SZ        该语言最近一次使用的根目录（路径屏预填）
+
+inline std::wstring managed_key(const std::string& lang) {
+    return L"Software\\EnvironManage\\" + su::utf8_to_wide(lang);
+}
+
+inline std::vector<std::wstring> managed_get_roots(const std::string& lang) {
+    std::vector<std::wstring> out;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS)
+        return out;
+    DWORD type = 0, size = 0;
+    if (RegQueryValueExW(key, L"roots", nullptr, &type, nullptr, &size) == ERROR_SUCCESS &&
+        size >= sizeof(wchar_t) * 2) {
+        std::wstring data;
+        data.resize(size / 2);
+        if (RegQueryValueExW(key, L"roots", nullptr, &type, (BYTE*)data.data(), &size) ==
+            ERROR_SUCCESS) {
+            size_t pos = 0;
+            while (pos < data.size()) {
+                size_t end = data.find(L'\0', pos);
+                if (end == std::wstring::npos) end = data.size();
+                std::wstring item = data.substr(pos, end - pos);
+                if (!item.empty()) out.push_back(item);
+                if (end == data.size() || end + 1 >= data.size()) break;
+                pos = end + 1;
+            }
+        }
+    }
+    RegCloseKey(key);
+    return out;
+}
+
+inline bool managed_set_roots(const std::string& lang, const std::vector<std::wstring>& roots,
+                              std::string& err) {
+    HKEY key = nullptr;
+    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
+                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 Software\\EnvironManage 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    if (roots.empty()) {
+        RegDeleteValueW(key, L"roots");
+        RegCloseKey(key);
+        return true;
+    }
+    std::wstring data;
+    for (const std::wstring& r : roots) data += r + L"\0";
+    data += L"\0";
+    rc = RegSetValueExW(key, L"roots", 0, REG_MULTI_SZ, (const BYTE*)data.c_str(),
+                        (DWORD)(data.size() * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS) {
+        err = "写入受管目录记录失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    return true;
+}
+
+inline bool managed_add_root(const std::string& lang, const fs::path& root) {
+    std::wstring w = root.wstring();
+    while (!w.empty() && w.back() == L'\\') w.pop_back();
+    std::vector<std::wstring> roots = managed_get_roots(lang);
+    std::wstring low = su::lower(w);
+    for (const std::wstring& r : roots)
+        if (su::lower(r) == low) return true;
+    roots.push_back(w);
+    std::string err;
+    if (!managed_set_roots(lang, roots, err)) {
+        logx::line("记录受管目录失败: " + err);
+        return false;
+    }
+    logx::linef("已记录受管目录 [%s]: %s", lang.c_str(), su::wide_to_utf8(w).c_str());
+    return true;
+}
+
+inline bool managed_remove_root(const std::string& lang, const fs::path& root) {
+    std::wstring w = root.wstring();
+    while (!w.empty() && w.back() == L'\\') w.pop_back();
+    std::vector<std::wstring> roots = managed_get_roots(lang);
+    std::vector<std::wstring> keep;
+    std::wstring low = su::lower(w);
+    for (const std::wstring& r : roots)
+        if (su::lower(r) != low) keep.push_back(r);
+    if (keep.size() == roots.size()) return true;
+    std::string err;
+    if (!managed_set_roots(lang, keep, err)) {
+        logx::line("更新受管目录记录失败: " + err);
+        return false;
+    }
+    logx::linef("已移除受管目录记录 [%s]: %s", lang.c_str(), su::wide_to_utf8(w).c_str());
+    return true;
+}
+
+inline bool managed_set_last_root(const std::string& lang, const fs::path& root) {
+    HKEY key = nullptr;
+    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
+                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+    if (rc != ERROR_SUCCESS) return false;
+    std::wstring w = root.wstring();
+    while (!w.empty() && w.back() == L'\\') w.pop_back();
+    rc = RegSetValueExW(key, L"last_root", 0, REG_SZ, (const BYTE*)w.c_str(),
+                        (DWORD)((w.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return rc == ERROR_SUCCESS;
+}
+
+inline std::wstring managed_get_last_root(const std::string& lang) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS)
+        return {};
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD size = sizeof(buf) - sizeof(wchar_t), type = 0;
+    std::wstring out;
+    if (RegQueryValueExW(key, L"last_root", nullptr, &type, (BYTE*)buf, &size) == ERROR_SUCCESS)
+        out = buf;
+    RegCloseKey(key);
+    return out;
+}
+
+// 在当前进程 PATH 中查找可执行文件，返回首个命中的完整路径（未找到返回空）
+inline fs::path find_in_path(const std::wstring& exe_name) {
+    wchar_t pathv[32768] = {};
+    GetEnvironmentVariableW(L"PATH", pathv, 32768);
+    std::wstring dirs(pathv);
+    std::error_code ec;
+    size_t pos = 0;
+    while (pos <= dirs.size()) {
+        size_t next = dirs.find(L';', pos);
+        std::wstring d = su::trim(
+            dirs.substr(pos, next == std::wstring::npos ? std::wstring::npos : next - pos));
+        if (!d.empty()) {
+            fs::path p = fs::path(d) / exe_name;
+            if (fs::is_regular_file(p, ec)) return p;
+        }
+        if (next == std::wstring::npos) break;
+        pos = next + 1;
+    }
+    return {};
 }
 
 // 递归移动/合并目录内容

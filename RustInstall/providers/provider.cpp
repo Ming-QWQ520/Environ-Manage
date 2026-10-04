@@ -1,4 +1,6 @@
-// providers/provider.cpp : Provider 公共安装流程（下载 → 校验 → 解压 → current → PATH/环境变量）
+// providers/provider.cpp : Provider 公共流程
+//   安装    下载 → 校验 → 解压到 <root>\<版本> → current junction → PATH/环境变量 → 验证
+//   卸载    删除版本目录 → 维护 junction → 清理 PATH/环境变量与受管记录
 #include "provider.hpp"
 
 #include "providers/archive.hpp"
@@ -13,10 +15,8 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
                      const std::function<void(uint64_t, uint64_t)>& progress,
                      const std::function<bool()>& cancelled, std::string& verify_line,
                      std::string& err) {
-    fs::path ver_dir = p.multi_version()
-                           ? root / "versions" / su::utf8_to_wide(p.id()) /
-                                 su::utf8_to_wide(a.version)
-                           : root;
+    // 统一版本化布局：<root>\<版本>，<root>\current junction 指向当前版本
+    fs::path ver_dir = root / su::utf8_to_wide(a.version);
     fs::path archives = root / "archives";
     if (!platform::ensure_dir(archives, err)) return false;
     fs::path dest = archives / a.filename;
@@ -35,10 +35,9 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
     if (!p.verify(a, dest, err)) return false;
     if (!p.install(a, dest, ver_dir, err)) return false;
 
-    fs::path base = p.multi_version()
-                        ? root / su::utf8_to_wide(p.id()) / L"current"
-                        : root;
-    if (p.multi_version() && switch_current)
+    // current junction（所有语言统一：<root>\current → <root>\<版本>）
+    fs::path base = root / L"current";
+    if (switch_current)
         if (!platform::make_junction(base, ver_dir, err)) return false;
 
     if (add_path) {
@@ -55,12 +54,112 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
                 return false;
     }
 
+    platform::managed_add_root(p.id(), root); // 记录受管根目录（供检测/卸载使用）
+
     fs::path vexe = base / su::utf8_to_wide(p.verify_exe());
     if (fs::exists(vexe)) {
         std::wstring flag = p.id() == "jdk" ? L"-version" : L"--version";
         verify_line = platform::capture_first_line(vexe, flag);
         if (!verify_line.empty()) logx::line("验证: " + verify_line);
     }
+    return true;
+}
+
+// ------------------------------------------------------- 已装扫描与卸载
+
+// 扫描单个根目录下的版本子目录（校验 verify_exe 存在），返回（版本名, 版本目录）
+std::vector<std::pair<std::string, fs::path>> scan_root_versions(Provider& p,
+                                                                 const fs::path& root) {
+    std::vector<std::pair<std::string, fs::path>> out;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return out;
+    for (const fs::directory_entry& e : fs::directory_iterator(root, ec)) {
+        if (!e.is_directory()) continue;
+        std::string name = su::wide_to_utf8(e.path().filename().wstring());
+        if (name.empty() || name == "current" || name == "archives" ||
+            name == "pnpm-repository" || name[0] == '_' || name[0] == '.')
+            continue;
+        if (!fs::exists(e.path() / su::utf8_to_wide(p.verify_exe()), ec)) continue;
+        out.push_back({name, e.path()});
+    }
+    return out;
+}
+
+// 扫描注册表记录的全部受管根目录
+std::vector<std::pair<std::string, fs::path>> managed_installs(Provider& p) {
+    std::vector<std::pair<std::string, fs::path>> out;
+    for (const std::wstring& r : platform::managed_get_roots(p.id()))
+        for (auto& v : scan_root_versions(p, r)) out.push_back(std::move(v));
+    return out;
+}
+
+// 卸载指定版本：删除版本目录、维护 current junction、PATH/环境变量与受管记录清理
+bool uninstall_version(Provider& p, const fs::path& root, const std::string& version,
+                       std::string& err) {
+    std::error_code ec;
+    fs::path ver_dir = root / su::utf8_to_wide(version);
+    if (!fs::is_directory(ver_dir, ec)) {
+        err = "未找到版本目录 " + su::wide_to_utf8(ver_dir.wstring());
+        return false;
+    }
+    if (!fs::exists(ver_dir / su::utf8_to_wide(p.verify_exe()), ec)) {
+        err = "目录不是受本工具管理的 " + p.display() + " 版本目录：" +
+              su::wide_to_utf8(ver_dir.wstring());
+        return false;
+    }
+
+    // junction 指向该版本时先移除链接本身（不动目标目录）
+    fs::path junction = root / L"current";
+    bool junction_here = false;
+    if (fs::exists(junction, ec)) {
+        std::error_code ec2;
+        junction_here = fs::equivalent(junction, ver_dir, ec2);
+        if (junction_here) {
+            fs::remove(junction, ec2);
+            logx::linef("已移除 junction: %s", su::wide_to_utf8(junction.wstring()).c_str());
+        }
+    }
+
+    logx::linef("正在删除版本目录: %s", su::wide_to_utf8(ver_dir.wstring()).c_str());
+    fs::remove_all(ver_dir, ec);
+    if (ec) {
+        err = "删除版本目录失败：" + ec.message() +
+              "（可能有程序正在使用该目录，请关闭后重试）";
+        return false;
+    }
+
+    // 剩余版本 → junction 重新指向最近使用的版本；无剩余 → 清理 PATH/环境变量/受管记录
+    auto remaining = scan_root_versions(p, root);
+    if (!remaining.empty()) {
+        fs::path best;
+        std::error_code tec;
+        fs::file_time_type best_time{};
+        for (auto& v : remaining) {
+            fs::file_time_type t = fs::last_write_time(v.second, tec);
+            if (tec || best.empty() || best_time < t) {
+                best = v.second;
+                best_time = t;
+            }
+        }
+        if (!platform::make_junction(junction, best, err)) return false;
+        logx::linef("current 已切换到: %s", su::wide_to_utf8(best.filename().wstring()).c_str());
+        return true;
+    }
+
+    fs::remove(junction, ec); // 清理残留 junction（可能指向被删目录）
+    fs::path bin = junction;
+    if (!p.bin_subdir().empty()) bin /= su::utf8_to_wide(p.bin_subdir());
+    std::string perr;
+    platform::remove_path_dir(bin, perr);
+    for (auto& ev : p.envs()) {
+        std::string e2;
+        platform::remove_user_env(ev.first, e2);
+    }
+    for (auto& ev : p.env_literals()) {
+        std::string e2;
+        platform::remove_user_env(ev.first, e2);
+    }
+    platform::managed_remove_root(p.id(), root);
     return true;
 }
 
