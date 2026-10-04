@@ -49,6 +49,7 @@ bool load_all(std::vector<json::Val>& out, std::string& err) {
 } // namespace
 
 std::string GoProvider::id() const { return "go"; }
+bool GoProvider::multi_version() const { return false; }
 std::string GoProvider::display() const { return "Go"; }
 
 bool GoProvider::list_versions(std::vector<VersionInfo>& out, std::string& err) {

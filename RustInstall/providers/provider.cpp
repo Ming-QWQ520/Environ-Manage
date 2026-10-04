@@ -1,6 +1,8 @@
 // providers/provider.cpp : Provider 公共流程
-//   安装    下载 → 校验 → 解压到 <root>\<版本> → current junction → PATH/环境变量 → 验证
-//   卸载    删除版本目录 → 维护 junction → 清理 PATH/环境变量与受管记录
+//   安装    下载 → 校验 → 解压（多版本：<root>\<版本>；平铺：<root>）→ junction（多版本）
+//           → PATH/环境变量 → 验证
+//   卸载    多版本：删除版本目录 → 维护 junction → 清理 PATH/环境变量与受管记录
+//           平铺：删除整个根目录 → 清理 PATH/环境变量与受管记录
 #include "provider.hpp"
 
 #include "providers/archive.hpp"
@@ -10,14 +12,41 @@
 
 namespace prov {
 
+namespace {
+
+// 平铺布局版本捕获：运行 verify_exe --version，取输出中第一个含数字的 token
+// （go1.22.0 / 8.0.425 / 0.13.0 / 8.3.14 / 3.3.5 / 2.47.1）
+std::string flat_capture_version(Provider& p, const fs::path& root) {
+    std::error_code ec;
+    fs::path exe = root / su::utf8_to_wide(p.verify_exe());
+    if (!fs::is_regular_file(exe, ec)) return {};
+    std::wstring flag = p.id() == "jdk" ? L"-version" : L"--version";
+    std::string line = platform::capture_first_line(exe, flag);
+    size_t i = 0;
+    while (i < line.size()) {
+        size_t b = line.find_first_not_of(" \t\r\n", i);
+        if (b == std::string::npos) break;
+        size_t e = line.find_first_of(" \t\r\n", b);
+        if (e == std::string::npos) e = line.size();
+        std::string tok = line.substr(b, e - b);
+        for (char c : tok)
+            if (isdigit((unsigned char)c)) return tok;
+        i = e;
+    }
+    return {};
+}
+
+} // namespace
+
 bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool add_path,
                      bool repair, bool switch_current,
                      const std::function<void(uint64_t, uint64_t)>& progress,
                      const std::function<bool()>& cancelled, std::string& verify_line,
                      std::string& err) {
-    // 统一版本化布局：<root>\<版本>，<root>\current junction 指向当前版本
-    fs::path ver_dir = root / su::utf8_to_wide(a.version);
-    fs::path archives = root / "archives";
+    // 布局分派：多版本 <root>\<版本>（JDK/Node.js）；单版本平铺直接 <root>（其余语言）
+    bool multi = p.multi_version();
+    fs::path ver_dir = multi ? root / su::utf8_to_wide(a.version) : root;
+    fs::path archives = root / (multi ? "archives" : "_archives");
     if (!platform::ensure_dir(archives, err)) return false;
     fs::path dest = archives / a.filename;
 
@@ -35,9 +64,9 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
     if (!p.verify(a, dest, err)) return false;
     if (!p.install(a, dest, ver_dir, err)) return false;
 
-    // current junction（所有语言统一：<root>\current → <root>\<版本>）
-    fs::path base = root / L"current";
-    if (switch_current)
+    // current junction（仅多版本语言：<root>\current → <root>\<版本>；平铺无 junction）
+    fs::path base = multi ? root / L"current" : root;
+    if (multi && switch_current)
         if (!platform::make_junction(base, ver_dir, err)) return false;
 
     if (add_path) {
@@ -47,7 +76,7 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
         for (auto& ev : p.envs()) {
             fs::path v = base;
             if (!ev.second.empty()) v /= su::utf8_to_wide(ev.second);
-            if (!platform::set_user_env(ev.first, v, err)) return false;
+            if (!platform::set_user_env(ev.first, v.wstring(), err)) return false;
         }
         for (auto& ev : p.env_literals())
             if (!platform::set_user_env(ev.first, su::utf8_to_wide(ev.second), err))
@@ -85,18 +114,65 @@ std::vector<std::pair<std::string, fs::path>> scan_root_versions(Provider& p,
     return out;
 }
 
-// 扫描注册表记录的全部受管根目录
-std::vector<std::pair<std::string, fs::path>> managed_installs(Provider& p) {
-    std::vector<std::pair<std::string, fs::path>> out;
-    for (const std::wstring& r : platform::managed_get_roots(p.id()))
-        for (auto& v : scan_root_versions(p, r)) out.push_back(std::move(v));
+// 扫描注册表记录的全部受管根目录；
+// 多版本语言：返回各版本子目录；平铺语言：根目录本体（版本经 --version 捕获）+ 历史版本子目录
+std::vector<ManagedInstall> managed_installs(Provider& p) {
+    std::vector<ManagedInstall> out;
+    bool multi = p.multi_version();
+    for (const std::wstring& r : platform::managed_get_roots(p.id())) {
+        fs::path root(r);
+        if (!multi) {
+            // 平铺：根目录即安装目录
+            std::error_code fec;
+            if (fs::exists(root / su::utf8_to_wide(p.verify_exe()), fec))
+                out.push_back({flat_capture_version(p, root), root, true});
+        }
+        for (auto& v : scan_root_versions(p, root))
+            out.push_back({v.first, v.second, false});
+    }
     return out;
 }
 
-// 卸载指定版本：删除版本目录、维护 current junction、PATH/环境变量与受管记录清理
+// 卸载指定版本；平铺语言 root 即安装目录（version 仅用于日志）
 bool uninstall_version(Provider& p, const fs::path& root, const std::string& version,
                        std::string& err) {
     std::error_code ec;
+    if (!p.multi_version()) {
+        // ---- 平铺布局：整个根目录即安装目录 ----
+        if (!fs::is_directory(root, ec) ||
+            !fs::exists(root / su::utf8_to_wide(p.verify_exe()), ec)) {
+            err = "目录不是受本工具管理的 " + p.display() + " 安装目录：" +
+                  su::wide_to_utf8(root.wstring());
+            return false;
+        }
+        logx::linef("正在删除 %s 安装目录: %s", p.display().c_str(),
+                    su::wide_to_utf8(root.wstring()).c_str());
+        // 旧版工具在此目录留下过 junction 时一并清理
+        fs::path legacy = root / L"current";
+        if (fs::exists(legacy, ec)) fs::remove_all(legacy, ec);
+        fs::remove_all(root, ec);
+        if (ec) {
+            err = "删除安装目录失败：" + ec.message() +
+                  "（可能有程序正在使用该目录，请关闭后重试）";
+            return false;
+        }
+        fs::path bin = root;
+        if (!p.bin_subdir().empty()) bin /= su::utf8_to_wide(p.bin_subdir());
+        std::string perr;
+        platform::remove_path_dir(bin, perr);
+        for (auto& ev : p.envs()) {
+            std::string e2;
+            platform::remove_user_env(ev.first, e2);
+        }
+        for (auto& ev : p.env_literals()) {
+            std::string e2;
+            platform::remove_user_env(ev.first, e2);
+        }
+        platform::managed_remove_root(p.id(), root);
+        logx::linef("已卸载 %s（%s）", p.display().c_str(), version.c_str());
+        return true;
+    }
+
     fs::path ver_dir = root / su::utf8_to_wide(version);
     if (!fs::is_directory(ver_dir, ec)) {
         err = "未找到版本目录 " + su::wide_to_utf8(ver_dir.wstring());

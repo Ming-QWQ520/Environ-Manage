@@ -15,6 +15,7 @@ public:
     bool verify(const Artifact& a, const fs::path& dest, std::string& err) override;
     bool install(const Artifact& a, const fs::path& archive_file, const fs::path& ver_dir,
                  std::string& err) override;
+    bool multi_version() const override; // 单版本平铺：直接安装于根目录
     std::string bin_subdir() const override;
     std::vector<std::pair<std::string, std::string>> envs() const override;
     std::vector<std::pair<std::string, std::string>> env_literals() const override;

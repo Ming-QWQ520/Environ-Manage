@@ -63,8 +63,13 @@ public:
     virtual bool install(const Artifact& a, const fs::path& archive_file,
                          const fs::path& ver_dir, std::string& err) = 0;
 
-    // ---- 安装布局描述（统一多版本目录 <root>\<版本> + current junction + 环境变量） ----
-    virtual std::string bin_subdir() const = 0;                                // current 下 PATH 子目录
+    // ---- 安装布局 ----
+    // 多版本（JDK/Node.js）： <root>\<版本> + current junction，支持共存/切换/按版本卸载
+    // 单版本平铺（Go/.NET/Zig/PHP/Ruby/Git）：直接安装于 <root>，更新即覆盖，卸载删整个根目录
+    virtual bool multi_version() const { return true; }
+
+    // ---- 布局描述（多版本：current 下相对路径；平铺：根目录下相对路径） ----
+    virtual std::string bin_subdir() const = 0;                                // PATH 子目录
     virtual std::vector<std::pair<std::string, std::string>> envs() const = 0; // 名 → current 相对值
     virtual std::vector<std::pair<std::string, std::string>> env_literals() const
         { return {}; }                                                         // 字面量环境变量
@@ -79,13 +84,21 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
                      const std::function<bool()>& cancelled, std::string& verify_line,
                      std::string& err);
 
-// ---- 已装扫描与卸载（多版本布局 <root>\<版本>）----
+// ---- 已装扫描与卸载 ----
+// 一条受管安装记录：多版本语言为版本子目录；平铺语言 flat_root=true（dir 即安装根目录）
+struct ManagedInstall {
+    std::string version;
+    fs::path dir;
+    bool flat_root = false;
+};
 // 扫描单个根目录下的版本子目录（校验 verify_exe 存在），返回（版本名, 版本目录）
 std::vector<std::pair<std::string, fs::path>> scan_root_versions(Provider& p,
                                                                  const fs::path& root);
-// 扫描注册表记录的全部受管根目录（HKCU\Software\EnvironManage\<id>\roots）
-std::vector<std::pair<std::string, fs::path>> managed_installs(Provider& p);
-// 卸载指定版本：删除版本目录、维护 current junction、PATH/环境变量与受管记录清理
+// 扫描注册表记录的全部受管根目录（HKCU\Software\EnvironManage\<id>\roots）；
+// 平铺语言同时返回根目录本体（flat_root=true，版本经 --version 捕获）与历史版本子目录
+std::vector<ManagedInstall> managed_installs(Provider& p);
+// 卸载指定版本：多版本删除版本目录并维护 junction；平铺删除整个根目录；
+// PATH/环境变量与受管记录一并清理
 bool uninstall_version(Provider& p, const fs::path& root, const std::string& version,
                        std::string& err);
 

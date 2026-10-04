@@ -3,12 +3,14 @@
 > By: Ming-QWQ520(明) · 开源协议: [AGPL-3.0](LICENSE)
 
 一个纯命令行的 **Windows 开发环境下载管理工具**（C++20，TUI 基于 [FTXUI](https://github.com/ArthurSonzogni/FTXUI)（已内置于 `RustInstall/third_party/ftxui`，MIT），网络层为 WinHTTP，**无其他第三方依赖**）。
-支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET / Zig / PHP / Ruby (RubyInstaller) / Git (MinGit)** 十种环境的完整下载、校验、安装与多版本管理。
+支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET / Zig / PHP / Ruby (RubyInstaller) / Git For Windows** 十种环境的完整下载、校验、安装与全生命周期管理。
 
 - **双模式**：无参数启动即为全屏 TUI 交互界面；带参数则为非交互批处理（脚本/CI 可用）。
-- **统一多版本布局 + 全生命周期管理**：所有语言（Rust 除外）安装到 `<安装目录>\<版本>`
-  （如 `D:\Python\3.12.6\python.exe`），`<安装目录>\current` junction 指向当前版本；
-  自动检测已装版本与位置，支持安装/更新/卸载。
+- **分语言布局 + 全生命周期管理**：**JDK / Python / Node.js 多版本共存**，安装到
+  `<安装目录>\<版本>`（如 `D:\Python\3.12.6\python.exe`），`<安装目录>\current` junction
+  指向当前版本；**Go / .NET / Zig / PHP / Ruby / Git For Windows 单版本平铺**，直接安装于
+  `<安装目录>`（如 `D:\Git\cmd\git.exe`），更新即覆盖、卸载删整个目录。
+  所有语言均自动检测已装版本与位置，支持安装/更新/卸载。
 - **国内网络友好**：GitHub API 经 gh-proxy 加速，安装包走中科大 / 上交 / 华为云 / npmmirror / 阿里云等镜像，失败自动切换，全程支持断点续传。
 - **完整性校验**：SHA-256 / MD5 校验和验证 + 下载字节数比对，校验和缺失时降级为大小校验。
 
@@ -27,7 +29,7 @@
 | **Zig** | `ziglang.org/download/index.json`（JSON 索引，自带 SHA-256） | 中科大 / npmmirror / 官方 | 索引自带 SHA-256 |
 | **PHP** | `windows.php.net` 官方目录解析（releases + archives） | 官方 releases → archives 回退 | `sha256.sum` → 大小比对 |
 | **Ruby** | `oneclick/rubyinstaller2` GitHub Releases（.7z） | gh-proxy 加速 → 直连 | 大小比对（官方无独立校验和） |
-| **Git** | `git-for-windows/git` GitHub Releases（MinGit 便携版） | gh-proxy 加速 → 直连 | 官方 `.sha256` → 大小比对 |
+| **Git** | `git-for-windows/git` GitHub Releases（Git For Windows 便携版 MinGit 包） | gh-proxy 加速 → 直连 | 官方 `.sha256` → 大小比对 |
 
 ---
 
@@ -126,7 +128,7 @@ Python 管理:
       --py-install         下载后静默安装（exe）/ 解压（zip）到 -p 目录
       --py-token <Token>   可选：python.org API Token（元数据增强，匿名 API 已限流）
 
-SDK 管理（多版本 + current junction）:
+SDK 管理:
       --sdk <id>           node / jdk / go / dotnet / zig / php / ruby / git
       --sdk-list           仅列出该 SDK 的版本后退出
       --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）
@@ -135,9 +137,10 @@ SDK 管理（多版本 + current junction）:
       --with-yarn          node 安装后经 Corepack 全局安装 yarn
       --corepack <开关>    enable（默认，启用 Corepack 管理 pnpm/yarn）/ disable
       --pnpm-home <目录>   pnpm/npm 存储根目录（默认 <目录>\pnpm-repository）
-      布局: <目录>\<版本>，<目录>\current junction 指向当前版本
+      布局: node/jdk 多版本 <目录>\<版本> + <目录>\current junction；
+            go/dotnet/zig/php/ruby/git 单版本平铺（直接安装于 <目录>）
 
-卸载（批处理；多语言统一布局 <目录>\<版本>）:
+卸载（批处理）:
       --uninstall [版本|all]
                            卸载受管安装（配合 --sdk <id> / --python；Rust 直接
                            --uninstall all）
@@ -189,7 +192,7 @@ RustInstall.exe --sdk php -p D:\Sdk
 :: 安装 Ruby 最新版（RubyInstaller 便携解压，无需运行安装器）
 RustInstall.exe --sdk ruby -p D:\Sdk
 
-:: 安装 Git 便携版（MinGit，官方精简包解压即用）
+:: 安装 Git For Windows 便携版（MinGit 官方精简包解压即用）
 RustInstall.exe --sdk git -p D:\Sdk
 ```
 
@@ -249,31 +252,35 @@ RustInstall.exe --sdk git -p D:\Sdk
 
 ---
 
-## Node.js / JDK / Go / .NET / Zig / PHP / Ruby / Git 多版本管理
+## Node.js / JDK / Go / .NET / Zig / PHP / Ruby / Git For Windows 管理
 
 TUI 选择目标或 `--sdk <id>` 进入，八个 SDK 走统一的 Provider 接口
 （`providers/provider.hpp`，UI 只依赖 `provider.hpp` + `registry.hpp`，各 Provider 通过
 静态注册器自注册到工厂，按名字创建）：
 
-| SDK | 版本源 | 支持标签 | 安装后 |
-| --- | --- | --- | --- |
-| Node.js | `nodejs.org/dist/index.json`（npmmirror 镜像同格式） | `lts` 字段：字符串 → **LTS · 代号**（如 Krypton）；false → Current | zip 解压到 `\<版本>`，exe 在版本目录根 |
-| JDK (Temurin) | Adoptium v3 `available_releases` + `feature_releases/<major>/ga` | API 的 LTS 大版本表 → **LTS**，其余功能版 | `\<release_name>`，`JAVA_HOME` 指向 current |
-| Go | `go.dev/dl/?mode=json&include=all`（golang.google.cn / 阿里云镜像同路径） | 无 LTS：最新两个 minor → **Supported**，其余 **EOL** | `\<版本>`（顶层 `go/` 自动合并），`GOROOT` 指向 current |
-| .NET | `builds.dotnet.microsoft.com` 的 `release-metadata/releases-index.json`（带 BOM，自动剥离） | `support-phase`/`release-type` → **LTS / STS / EOL / Preview** | `\<SDK 版本>`（扁平结构），`DOTNET_ROOT` 指向 current |
-| Zig | `ziglang.org/download/index.json`（对象键为版本号，跳过 master） | 稳定版 **Stable** | `\<版本>`（顶层 `zig-windows-*/` 自动合并），exe 在版本目录根 |
-| PHP | `windows.php.net` 目录解析（`php-*-[nts-]Win32-*-<arch>.zip`） | **TS**（线程安全）/ **NTS** | `\<版本>`（扁平结构），exe 在版本目录根 |
-| Ruby | `oneclick/rubyinstaller2` Releases 的 `rubyinstaller-*-{x64,x86}.7z` | **RubyInstaller** | `\<版本>`（7z 解压，经自动下载的 7zr.exe），`bin\ruby.exe` |
-| Git | `git-for-windows/git` Releases 的 `MinGit-*-*.zip`（排除 busybox） | **MinGit** | `\<版本>`（扁平结构），`cmd\git.exe` |
+| SDK | 版本源 | 支持标签 | 布局 | 安装后 |
+| --- | --- | --- | --- | --- |
+| Node.js | `nodejs.org/dist/index.json`（npmmirror 镜像同格式） | `lts` 字段：字符串 → **LTS · 代号**（如 Krypton）；false → Current | 多版本 | zip 解压到 `\<版本>`，exe 在版本目录根 |
+| JDK (Temurin) | Adoptium v3 `available_releases` + `feature_releases/<major>/ga` | API 的 LTS 大版本表 → **LTS**，其余功能版 | 多版本 | `\<release_name>`，`JAVA_HOME` 指向 current |
+| Go | `go.dev/dl/?mode=json&include=all`（golang.google.cn / 阿里云镜像同路径） | 无 LTS：最新两个 minor → **Supported**，其余 **EOL** | 单版本平铺 | 直接安装于根目录（顶层 `go/` 自动合并），`GOROOT` 指向根目录 |
+| .NET | `builds.dotnet.microsoft.com` 的 `release-metadata/releases-index.json`（带 BOM，自动剥离） | `support-phase`/`release-type` → **LTS / STS / EOL / Preview** | 单版本平铺 | 直接安装于根目录（扁平结构），`DOTNET_ROOT` 指向根目录 |
+| Zig | `ziglang.org/download/index.json`（对象键为版本号，跳过 master） | 稳定版 **Stable** | 单版本平铺 | 直接安装于根目录（顶层 `zig-windows-*/` 自动合并） |
+| PHP | `windows.php.net` 目录解析（`php-*-[nts-]Win32-*-<arch>.zip`） | **TS**（线程安全）/ **NTS** | 单版本平铺 | 直接安装于根目录（扁平结构） |
+| Ruby | `oneclick/rubyinstaller2` Releases 的 `rubyinstaller-*-{x64,x86}.7z` | **RubyInstaller** | 单版本平铺 | 直接安装于根目录（7z 解压，经自动下载的 7zr.exe） |
+| Git For Windows | `git-for-windows/git` Releases 的 `MinGit-*-*.zip`（排除 busybox） | **MinGit** | 单版本平铺 | 直接安装于根目录（扁平结构），`cmd\git.exe` |
 
-- **多版本布局（统一）**：`<安装目录>\<版本>`；`<安装目录>\current` 为目录 junction
-  （`mklink /J`，无需管理员），指向当前版本（全部 SDK 语言与 Python 一致）
-- **PATH**：加入 `<安装目录>\current[\<bin>]`；JDK 另设 `JAVA_HOME`、Go 设 `GOROOT`、
-  .NET 设 `DOTNET_ROOT` 与 `DOTNET_CLI_TELEMETRY_OPTOUT=1`；Zig / PHP / Ruby / Git 仅写 PATH
+- **布局分派**：`node` / `jdk` 多版本（`<安装目录>\<版本>` + `<安装目录>\current` junction，
+  与 Python 一致）；其余语言单版本平铺（直接安装于 `<安装目录>`，无版本子目录与 junction，
+  更新为覆盖安装，卸载删除整个安装目录）。历史版本安装的旧多版本目录仍可正常检测与卸载
+- **PATH**：多版本加入 `<安装目录>\current[\<bin>]`；平铺加入 `<安装目录>[\<bin>]`；
+  JDK 另设 `JAVA_HOME`、Go 设 `GOROOT`、.NET 设 `DOTNET_ROOT` 与
+  `DOTNET_CLI_TELEMETRY_OPTOUT=1`；Zig / PHP / Ruby / Git 仅写 PATH
 - **检测 / 更新 / 卸载 / 切换 / 打开目录**：进入目标环境后自动扫描已装版本与位置（本工具受管记录 +
-  注册表 / 环境变量 / PATH 探测外部安装），可一键更新到最新（新版本写入独立版本目录后
-  切换 current，旧版本保留）、按版本卸载（删除版本目录 + 自动重指 current，
-  全部卸完后清理 PATH/环境变量/受管记录）；**设为当前**（重指 current junction，PATH 立即生效，多版本共存秒切）与**打开版本目录**（`O` 键）；无已装版本时不显示已安装列表区块；批处理用 `--uninstall [版本|all]`
+  注册表 / 环境变量 / PATH 探测外部安装），可一键更新到最新（多版本新版本共存并切换 current，
+  平铺覆盖安装）、卸载（多版本按版本删除 + 自动重指 current，平铺删除整个安装目录，
+  全部卸完后清理 PATH/环境变量/受管记录）；**设为当前**（仅多版本；重指 current junction，
+  PATH 立即生效）与**打开安装目录**（`O` 键）；无已装版本时不显示已安装列表区块；
+  批处理用 `--uninstall [版本|all]`
 - **校验**：Node 用 `SHASUMS256.txt`；JDK 用 API 自带的 SHA-256；Go 用 `files.sha256`；
   .NET 无校验和，由下载字节数与 `Content-Length` 比对保证
 - **镜像**：Node 走 npmmirror、Go 走阿里云/国内官方、JDK 的 GitHub 直链走 gh-proxy 加速，
@@ -309,6 +316,8 @@ TUI 选择目标或 `--sdk <id>` 进入，八个 SDK 走统一的 Provider 接�
 - **列表**：逐语言显示已检测到的版本摘要（最多 3 个，超出显示总数）、当前版本标记与
   外部安装标记；选中某语言后在下方明细区显示每个版本的完整安装位置与管理来源。
   **未检测到任何已安装语言时显示引导文案，不显示空列表。**
+  列表由路由层直接驱动滚动（`↑↓` / `W S` 翻行、`Home/End` 首尾、`PgUp/PgDn` 翻页），
+  长列表自动窗口化，选中项始终可见。
 - **进入管理**：`Enter` 跳转该语言的管理界面 —— Rust 进"检查更新"屏，其余语言进
   "已安装检测"屏（安装/更新/卸载/设为当前/打开目录）。`←`/`→`/`Esc` 返回首页。
 - **PATH 体检（`P`）**：扫描用户 PATH（HKCU\Environment，先展开环境变量再判断），
@@ -345,7 +354,8 @@ tar.exe 解压 → 合并到安装目录 → 验证 rustc/cargo → 可选写入
 ```
 
 SDK 侧的统一安装流程（`providers/provider.cpp` 的 `install_to_root`）：
-**下载 → 校验 → 解压到版本目录 → 更新 current junction → 写入 PATH/环境变量 → 运行验证命令**。
+**下载 → 校验 → 解压（多版本到 `<root>\<版本>`，平铺到 `<root>`）→ 更新 current junction
+（仅多版本）→ 写入 PATH/环境变量 → 运行验证命令**。
 
 ---
 

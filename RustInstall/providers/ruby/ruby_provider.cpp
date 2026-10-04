@@ -58,6 +58,7 @@ fs::path ensure_7zr(std::string& err) {
 } // namespace
 
 std::string RubyProvider::id() const { return "ruby"; }
+bool RubyProvider::multi_version() const { return false; }
 std::string RubyProvider::display() const { return "Ruby (RubyInstaller)"; }
 
 bool RubyProvider::ensure_list(std::string& err) {

@@ -27,7 +27,8 @@ std::string git_suffix() {
 } // namespace
 
 std::string GitProvider::id() const { return "git"; }
-std::string GitProvider::display() const { return "Git (MinGit)"; }
+bool GitProvider::multi_version() const { return false; }
+std::string GitProvider::display() const { return "Git For Windows"; }
 
 bool GitProvider::ensure_list(std::string& err) {
     if (!url_of_.empty()) return true;
@@ -56,7 +57,7 @@ bool GitProvider::ensure_list(std::string& err) {
         logx::line(err);
         return false;
     }
-    logx::linef("Git (MinGit) 版本：%d 条", (int)url_of_.size());
+    logx::linef("Git For Windows 版本：%d 条", (int)url_of_.size());
     return true;
 }
 

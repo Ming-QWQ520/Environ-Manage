@@ -45,6 +45,7 @@ bool load_index(std::vector<json::Val>& out, std::string& err) {
 } // namespace
 
 std::string DotnetProvider::id() const { return "dotnet"; }
+bool DotnetProvider::multi_version() const { return false; }
 std::string DotnetProvider::display() const { return ".NET"; }
 
 bool DotnetProvider::list_versions(std::vector<VersionInfo>& out, std::string& err) {

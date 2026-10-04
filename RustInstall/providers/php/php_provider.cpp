@@ -77,6 +77,7 @@ bool parse_php_zip(const std::string& name, PhpZip& out) {
 } // namespace
 
 std::string PhpProvider::id() const { return "php"; }
+bool PhpProvider::multi_version() const { return false; }
 std::string PhpProvider::display() const { return "PHP"; }
 
 bool PhpProvider::ensure_list(std::string& err) {

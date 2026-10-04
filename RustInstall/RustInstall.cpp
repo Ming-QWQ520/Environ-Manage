@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdarg>
@@ -84,13 +85,14 @@ static void print_usage() {
         "      --py-install        下载后静默安装（exe）/ 解压（zip）到 -p 目录\n"
         "      --py-token <Token>  可选：python.org API Token（元数据增强，匿名 API 已限流）\n"
         "\n"
-        "SDK 管理（多版本 + current junction）:\n"
+        "SDK 管理:\n"
         "      --sdk <id>          node / jdk / go / dotnet / zig / php / ruby / git\n"
         "      --sdk-list          仅列出该 SDK 的版本后退出\n"
         "      --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）\n"
-        "      布局: <目录>\\<版本>，<目录>\\current junction 指向当前版本\n"
+        "      布局: node/jdk 多版本 <目录>\\<版本> + current junction；\n"
+        "            go/dotnet/zig/php/ruby/git 单版本平铺（直接安装于 <目录>）\n"
         "\n"
-        "卸载（批处理模式；多语言统一布局 <目录>\\<版本>）:\n"
+        "卸载（批处理模式）:\n"
         "      --uninstall [版本|all]\n"
         "                          卸载受管安装（配合 --sdk <id> / --python；Rust 直接\n"
         "                          --uninstall all）\n"
@@ -116,7 +118,7 @@ static void print_usage() {
         "                                             Node.js + pnpm（存储规范化到指定目录）\n"
         "  RustInstall.exe --sdk jdk  -p D:\\Sdk --sdk-version 21      Temurin JDK 21\n"
         "  RustInstall.exe --sdk zig  -p D:\\Sdk                       Zig 最新稳定版\n"
-        "  RustInstall.exe --sdk git  -p D:\\Sdk                       Git (MinGit) 便携版\n");
+        "  RustInstall.exe --sdk git  -p D:\\Sdk                       Git For Windows 便携版\n");
 }
 
 struct Options {
@@ -1224,6 +1226,7 @@ static int run_sdk_batch(const Options& opts) {
     }
     ui::progress_done(f.size, true);
 
+    bool multi = provider->multi_version();
     fs::path current = root / L"current";
 
     // Node.js 工具链（优先级：npm/npx 随装自带 → Corepack 开关 → pnpm/yarn 经 Corepack）
@@ -1251,10 +1254,14 @@ static int run_sdk_batch(const Options& opts) {
     printf("\n%s================ 完成汇总 ================%s\n", ui::kCyan, ui::kReset);
     printf("  目标    : %s %s [%s]\n", provider->display().c_str(), f.version.c_str(),
            vi.tag_label.c_str());
-    printf("  版本目录: %s\n",
-           su::wide_to_utf8((root / su::utf8_to_wide(f.version)).wstring())
-               .c_str());
-    printf("  current : %s（junction）\n", su::wide_to_utf8(current.wstring()).c_str());
+    if (multi) {
+        printf("  版本目录: %s\n",
+               su::wide_to_utf8((root / su::utf8_to_wide(f.version)).wstring())
+                   .c_str());
+        printf("  current : %s（junction）\n", su::wide_to_utf8(current.wstring()).c_str());
+    } else {
+        printf("  安装目录: %s（单版本平铺）\n", su::wide_to_utf8(root.wstring()).c_str());
+    }
     if (!verify_line.empty()) printf("  %s\n", verify_line.c_str());
     if (!tool_report.empty()) {
         for (const std::string& l : tool_report) printf("  %s\n", l.c_str());
@@ -1399,9 +1406,12 @@ static int run_uninstall_batch(const Options& opts) {
                    provider->display().c_str(), ui::kReset);
             return 1;
         }
-        for (auto& [ver, dir] : installs) {
+        for (const auto& inst : installs) {
+            const std::string& ver = inst.version;
+            const fs::path& dir = inst.dir;
             if (!all && ver != target) continue;
-            fs::path root = dir.parent_path();
+            // 平铺布局：dir 即安装目录；多版本：dir 为版本子目录，root 为其父目录
+            fs::path root = inst.flat_root ? dir : dir.parent_path();
             std::string err;
             printf("卸载 %s %s（%s）…\n", provider->display().c_str(), ver.c_str(),
                    su::wide_to_utf8(dir.wstring()).c_str());
@@ -1686,11 +1696,13 @@ inline bool path_under(const fs::path& p, const fs::path& root) {
 // ------------------------------------------------------- 已装检测（TUI 共用）
 
 // 一条已装记录：版本 + 位置 + 管理来源 + 是否为 current junction 指向
+// flat_root：该路径本身即安装根目录（单版本平铺语言），无版本子目录/junction
 struct DetectedInst {
     std::string version;
     std::string path; // 版本目录 / 安装根目录（utf8）
     bool managed = false;
     bool is_current = false;
+    bool flat_root = false;
 };
 
 // 某语言已装检测（后台线程调用；provider 为空时按 Python 流程）：
@@ -1731,9 +1743,14 @@ inline std::vector<DetectedInst> detect_lang_installs(const std::string& id,
         }
     } else if (provider) {
         auto insts = prov::managed_installs(*provider);
-        for (auto& [ver, dir] : insts) {
-            DetectedInst d{ver, su::wide_to_utf8(dir.wstring()), true, false};
-            mark_current(d, dir);
+        for (auto& inst : insts) {
+            DetectedInst d{inst.version, su::wide_to_utf8(inst.dir.wstring()), true, false,
+                           inst.flat_root};
+            if (d.version.empty()) d.version = "未知版本"; // 平铺 --version 捕获失败兑底
+            if (inst.flat_root)
+                d.is_current = true; // 平铺安装：根目录即 PATH 指向
+            else
+                mark_current(d, inst.dir);
             rows.push_back(std::move(d));
         }
         // 受管行按版本自然序降序（新版本在前）
@@ -1945,6 +1962,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
     bool inst_confirm = false;    // 卸载二次确认状态
     std::string inst_confirm_ver; // 待确认卸载的版本
     fs::path inst_confirm_dir;    // 待确认卸载的版本目录
+    bool inst_confirm_flat = false; // 待确认卸载是否为平铺安装（根目录即安装目录）
     std::vector<std::string> uninstall_lines; // 卸载完成页展示
 
     std::string inst_lang_disp() const {
@@ -1965,6 +1983,11 @@ struct AppState : std::enable_shared_from_this<AppState> {
         for (const InstRow& r : inst_rows)
             if (r.version == ver) return su::utf8_to_wide(r.path);
         return {};
+    }
+    // 该语言是否多版本布局（JDK/Python/Node.js）；其余单版本平铺
+    bool lang_multi_version() const {
+        if (pymode) return true;
+        return sdk_provider ? sdk_provider->multi_version() : true;
     }
 
     // 后台检测：受管根目录扫描（注册表）+ 外部安装探测（注册表/环境变量/PATH）
@@ -2014,14 +2037,19 @@ struct AppState : std::enable_shared_from_this<AppState> {
                     (su::starts_with(max_ver, latest + ".") || max_ver == latest))
                     show = true;
                 if (show) {
-                    inst_items.push_back("更新到最新版 " + latest + "（当前 " + max_ver + "）");
+                    bool flat_upd = !pymode && sdk_provider && !sdk_provider->multi_version();
+                    inst_items.push_back(flat_upd
+                                             ? "更新到最新版 " + latest + "（覆盖当前 " +
+                                                   max_ver + "）"
+                                             : "更新到最新版 " + latest + "（当前 " + max_ver +
+                                                   "，版本共存）");
                     inst_actions.push_back({IA_UPDATE, 0});
                 }
             }
-            // 受管版本：设为当前（非 current 指向时） + 卸载
+            // 受管版本：设为当前（仅多版本布局；非 current 指向时）+ 卸载
             for (size_t i = 0; i < inst_rows.size(); ++i) {
                 if (!inst_rows[i].managed) continue;
-                if (!inst_rows[i].is_current) {
+                if (!inst_rows[i].is_current && !inst_rows[i].flat_root) {
                     inst_items.push_back("设为当前 ▸ " + inst_rows[i].version + "（" +
                                          inst_rows[i].path + "）");
                     inst_actions.push_back({IA_SWITCH, i});
@@ -2040,7 +2068,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             }
             if (open_idx >= inst_rows.size() && !inst_rows.empty()) open_idx = 0;
             if (open_idx < inst_rows.size()) {
-                inst_items.push_back("打开版本目录（" + inst_rows[open_idx].path + "）");
+                inst_items.push_back("打开安装目录（" + inst_rows[open_idx].path + "）");
                 inst_actions.push_back({IA_OPEN, open_idx});
             }
             inst_items.push_back("返回");
@@ -2073,7 +2101,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
             else latest = sdk_versions.empty() ? std::string() : sdk_versions[0].id;
             fs::path ver_dir = inst_row_dir(max_ver);
             if (latest.empty() || ver_dir.empty()) return;
-            fs::path root = ver_dir.parent_path();
+            // 平铺布局：版本目录即根目录，更新为覆盖安装；多版本：根目录为版本目录父级
+            fs::path root = lang_multi_version() ? ver_dir.parent_path() : ver_dir;
             logx::linef("用户选择: 更新 %s → %s（根目录 %s）", max_ver.c_str(),
                         latest.c_str(), su::wide_to_utf8(root.wstring()).c_str());
             s.dir = root;
@@ -2096,8 +2125,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
             }
             return;
         }
-        if (act == IA_SWITCH) { // 设为当前版本（重指 current junction）
-            if (idx >= inst_rows.size()) return;
+        if (act == IA_SWITCH) { // 设为当前版本（重指 current junction；仅多版本布局）
+            if (idx >= inst_rows.size() || inst_rows[idx].flat_root) return;
             fs::path ver_dir = su::utf8_to_wide(inst_rows[idx].path);
             logx::linef("用户选择: 设为当前 %s %s", inst_lang_disp().c_str(),
                         inst_rows[idx].version.c_str());
@@ -2117,6 +2146,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 inst_confirm = true;
                 inst_confirm_ver = inst_rows[idx].version;
                 inst_confirm_dir = su::utf8_to_wide(inst_rows[idx].path);
+                inst_confirm_flat = inst_rows[idx].flat_root;
                 logx::linef("用户选择: 卸载 %s %s（待确认）", inst_lang_disp().c_str(),
                             inst_confirm_ver.c_str());
                 rebuild_inst_items();
@@ -2125,7 +2155,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
             inst_confirm = false;
             std::string ver = inst_confirm_ver;
             fs::path ver_dir = inst_confirm_dir;
-            start_uninstall_work(ver, ver_dir);
+            bool flat = inst_confirm_flat;
+            start_uninstall_work(ver, ver_dir, flat);
             return;
         }
         // IA_BACK
@@ -2166,19 +2197,21 @@ struct AppState : std::enable_shared_from_this<AppState> {
         return true;
     }
 
-    // 卸载（后台执行）：删除版本目录 + junction 维护 + PATH/受管记录清理
-    void start_uninstall_work(const std::string& ver, const fs::path& ver_dir) {
-        fs::path root = ver_dir.parent_path();
+    // 卸载（后台执行）：多版本删除版本目录 + junction 维护；平铺删除整个根目录
+    // PATH/受管记录清理
+    void start_uninstall_work(const std::string& ver, const fs::path& ver_dir, bool flat) {
+        fs::path root = flat ? ver_dir : ver_dir.parent_path();
         reset_work("正在卸载 " + inst_lang_disp() + " " + ver);
         {
             std::lock_guard<std::mutex> lk(wmu);
             w_file = su::wide_to_utf8(ver_dir.wstring());
-            w_note = "正在删除版本目录并维护 junction / PATH …";
+            w_note = flat ? "正在删除安装目录并清理 PATH / 受管记录 …"
+                          : "正在删除版本目录并维护 junction / PATH …";
         }
         w_kind = 4;
         bool py = pymode;
         auto self = shared_from_this();
-        w_thread = std::thread([self, py, ver, root, ver_dir] {
+        w_thread = std::thread([self, py, ver, root, ver_dir, flat] {
             std::string err;
             bool ok = false;
             if (py) ok = uninstall_python_version(root, ver, err);
@@ -2191,7 +2224,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 self->uninstall_lines.push_back("√ 已卸载 " + self->inst_lang_disp() + " " + ver);
                 self->uninstall_lines.push_back("  原位置: " + su::wide_to_utf8(ver_dir.wstring()));
                 self->uninstall_lines.push_back(
-                    "  current junction / PATH / 受管记录已同步维护；剩余版本自动接管 current");
+                    flat ? "  安装目录 / PATH / 环境变量 / 受管记录已清理"
+                         : "  current junction / PATH / 受管记录已同步维护；剩余版本自动接管 current");
                 self->w_phase = 1;
             } else {
                 self->w_phase = 2;
@@ -2237,11 +2271,11 @@ struct AppState : std::enable_shared_from_this<AppState> {
     }
     std::map<std::string, py::PyApiMeta> py_api_meta;
     bool py_api_loaded = false;
-    std::vector<std::string> ch_items{"Rust 环境",       "Python 环境",
-                                      "Node.js",         "JDK (Temurin)",
-                                      "Go",              ".NET",
-                                      "Zig",             "PHP",
-                                      "Ruby",            "Git (MinGit)"};
+    std::vector<std::string> ch_items{"Rust 环境",    "Python 环境",
+                                      "Node.js",      "JDK (Temurin)",
+                                      "Go",           ".NET",
+                                      "Zig",          "PHP",
+                                      "Ruby",         "Git For Windows"};
     int ch_sel = 0;
 
     // SDK 管理（Node/JDK/Go/.NET）
@@ -2290,9 +2324,9 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 const char* disp;
             } kLangs[] = {{"rust", "Rust"},       {"python", "Python"},
                           {"node", "Node.js"},    {"jdk", "JDK (Temurin)"},
-                          {"go", "Go"},          {"dotnet", ".NET"},
-                          {"zig", "Zig"},        {"php", "PHP"},
-                          {"ruby", "Ruby"},      {"git", "Git (MinGit)"}};
+                          {"go", "Go"},           {"dotnet", ".NET"},
+                          {"zig", "Zig"},         {"php", "PHP"},
+                          {"ruby", "Ruby"},       {"git", "Git For Windows"}};
             std::vector<HubLang> out;
             for (const auto& L : kLangs) {
                 HubLang hl;
@@ -3492,10 +3526,14 @@ struct AppState : std::enable_shared_from_this<AppState> {
         std::vector<std::string> v;
         if (w_kind == 4 || w_kind == 5 || w_kind == 6) return uninstall_lines; // 卸载/切换结果
         if (!sdk_id.empty() && sdk_provider) {
-            fs::path ready = s.dir / L"current"; // 统一多版本布局：<root>\<版本>
-            v.push_back("√ " + sdk_provider->display() + " " + sdk_file.version +
-                        " 就绪: " + w(ready) + "（→ " +
-                        w(s.dir / su::utf8_to_wide(sdk_file.version)) + "）");
+            if (sdk_provider->multi_version()) { // 多版本布局：<root>\<版本> + current
+                v.push_back("√ " + sdk_provider->display() + " " + sdk_file.version +
+                            " 就绪: " + w(s.dir / L"current") + "（→ " +
+                            w(s.dir / su::utf8_to_wide(sdk_file.version)) + "）");
+            } else { // 单版本平铺：程序文件直接位于根目录
+                v.push_back("√ " + sdk_provider->display() + " " + sdk_file.version +
+                            " 就绪: " + w(s.dir) + "（单版本平铺布局）");
+            }
             if (!sdk_verify_line.empty()) v.push_back(sdk_verify_line);
             for (const std::string& l : sdk_tool_lines) v.push_back(l);
             if (s.path_added) v.push_back("√ 已加入 PATH/环境变量（重新打开终端后生效）");
@@ -3584,6 +3622,57 @@ static Component make_menu(std::vector<std::string>* entries, int* sel,
     MenuOption o = MenuOption::Vertical();
     o.on_enter = std::move(on_enter);
     return with_wasd(Menu(entries, sel, o));
+}
+
+// 自绘可视窗口起始下标（保证选中项始终可见，长列表可滚动）
+static int vis_window_start(int n, int sel, int vis) {
+    int start = 0;
+    if (n > vis) {
+        start = std::min(sel - vis / 2, n - vis);
+        if (start < 0) start = 0;
+    }
+    return start;
+}
+
+// 列表通用导航（↑↓/W S/Home/End/PageUp/PageDown）；n 为条目数，命中返回 true。
+// 不依赖 FTXUI Menu 焦点语义，由路由层直接驱动（修复部分页面无法上下移动的问题）
+static bool list_nav_event(const Event& e, int n, int& sel) {
+    if (e == Event::ArrowUp) {
+        if (sel > 0) sel--;
+        return true;
+    }
+    if (e == Event::ArrowDown) {
+        if (sel < n - 1) sel++;
+        return true;
+    }
+    if (e == Event::Home) {
+        sel = 0;
+        return true;
+    }
+    if (e == Event::End) {
+        if (n > 0) sel = n - 1;
+        return true;
+    }
+    if (e == Event::PageUp) {
+        sel = std::max(0, sel - 10);
+        return true;
+    }
+    if (e == Event::PageDown) {
+        if (n > 0) sel = std::min(n - 1, sel + 10);
+        return true;
+    }
+    if (e.is_character()) {
+        const std::string& ch = e.character();
+        if (ch == "w" || ch == "W") {
+            if (sel > 0) sel--;
+            return true;
+        }
+        if (ch == "s" || ch == "S") {
+            if (sel < n - 1) sel++;
+            return true;
+        }
+    }
+    return false;
 }
 
 static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& screen) {
@@ -3848,8 +3937,8 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             v.push_back(text("  " + line) | color(Color::Green));
         }
         v.push_back(text(""));
-        v.push_back(
-            text("←/→ 全部已装语言管理 · 统一多版本布局 <安装目录>\\<版本>，current 切换") |
+        v.push_back(text(
+            "←/→ 全部已装语言管理中心 · JDK/Python/Node.js 多版本 <安装目录>\\<版本> · 其余单版本平铺") |
             dim);
         return window(text("选择管理目标"), vbox(std::move(v)));
     });
@@ -4015,14 +4104,17 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         Element p_line =
             st->cb_path ? text("[√] 写入 PATH 与环境变量   （P 切换）") | color(Color::Green)
                         : text("[ ] 写入 PATH 与环境变量   （P 切换）");
+        bool multi = st->sdk_provider && st->sdk_provider->multi_version();
         std::wstring layout =
-            st->s.dir.wstring() + L"\\<版本>，current junction 指向当前版本";
+            multi ? st->s.dir.wstring() + L"\\<版本>，current junction 指向当前版本"
+                  : st->s.dir.wstring() + L"（程序文件直接位于根目录，无 junction）";
         Elements rows = {
             text("目标     : " + (st->sdk_provider ? st->sdk_provider->display() : st->sdk_id)),
             text("版本     : " + st->sdk_file.version),
             text("文件     : " + st->sdk_file.filename),
             text("校验     : " + std::string(!st->sdk_file.sha256.empty() ? "SHA-256" : "下载完整性")),
-            text("模式     : 多版本目录 <安装目录>\\<版本> + current junction"),
+            text(multi ? "模式     : 多版本目录 <安装目录>\\<版本> + current junction"
+                       : "模式     : 单版本平铺目录（更新覆盖，卸载删除整个目录）"),
             text("根目录   : " + w(st->s.dir)),
             text("布局     : " + su::wide_to_utf8(layout)),
             text(""),
@@ -4056,8 +4148,8 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     });
 
     // ---- 已安装检测（统一：Python / SDK，自动检测 + 显示位置 + 更新/卸载/切换） ----
-    auto inst_menu = make_menu(&st->inst_items, &st->inst_sel, [st] { st->inst_accept(); });
-    Component inst_screen = Renderer(inst_menu, [st, inst_menu]() -> Element {
+    // 键位由路由层直接处理（↑↓/W S 滚动 + Enter + U/O 热键），此处仅自绘可视窗口
+    Component inst_screen = Renderer([st]() -> Element {
         Elements v;
         std::string disp = st->inst_lang_disp();
         if (st->inst_detect_lang != st->inst_lang_id() || st->inst_items.empty()) {
@@ -4071,21 +4163,39 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             std::lock_guard<std::mutex> lk(st->wmu);
             rows = st->inst_rows;
         }
-        // 已安装列表（无安装时不显示该区块）
+        // 已安装列表（无安装时不显示该区块；超过 8 行折叠）
         if (!rows.empty()) {
             v.push_back(text("已安装列表（自动检测）：") | bold);
+            int shown = 0;
             for (const auto& r : rows) {
+                if (shown >= 8) break;
                 std::string tag = r.managed ? "本工具管理" : "外部安装";
                 std::string cur = r.is_current ? "  ← 当前版本" : "";
                 v.push_back(text("  " + r.version + "    " + r.path + "  [" + tag + "]" + cur) |
                             (r.managed ? color(Color::Green) : color(Color::GrayLight)));
+                ++shown;
             }
+            if ((int)rows.size() > 8)
+                v.push_back(text("  … 等 " + std::to_string(rows.size()) + " 个版本") | dim);
             v.push_back(text(""));
         }
         v.push_back(text("可执行操作："));
-        v.push_back(inst_menu->Render());
+        int n = (int)st->inst_items.size();
+        int vis = std::min(n, 12);
+        int start = vis_window_start(n, st->inst_sel, vis);
+        for (int i = start; i < std::min(n, start + vis); ++i) {
+            bool selq = i == st->inst_sel;
+            std::string label = (selq ? "▶ " : "   ") + st->inst_items[i];
+            Element row = text(label);
+            if (selq) row = row | bold | color(Color::Green);
+            v.push_back(row);
+        }
+        if (n > vis)
+            v.push_back(text(sfmt("  （%d-%d / 共 %d 项，↑↓ 滚动）", start + 1,
+                                  std::min(n, start + vis), n)) |
+                        dim);
         if (st->inst_confirm)
-            v.push_back(text("⚠ 卸载将删除整个版本目录且不可恢复，再次 Enter 确认") |
+            v.push_back(text("⚠ 卸载将删除安装目录且不可恢复，再次 Enter 确认") |
                         color(Color::Yellow));
         v.push_back(text(""));
         v.push_back(text("O 打开目录 · U 重新检测 · Esc 返回") | dim);
@@ -4093,8 +4203,8 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     });
 
     // ---- 管理中心（全部已装语言；首页 ←/→ 进入） ----
-    auto hub_menu = make_menu(&st->hub_items, &st->hub_sel, [st] { st->hub_accept(); });
-    Component hub_screen = Renderer(hub_menu, [st, hub_menu]() -> Element {
+    // 键位由路由层直接处理（↑↓/W S 滚动 + ←/→/Esc 返回 + Enter + P/C/U 热键）
+    Component hub_screen = Renderer([st]() -> Element {
         Elements v;
         v.push_back(text("本机已安装语言（自动检测，Enter 进入该语言管理）：") | bold);
         v.push_back(text(""));
@@ -4105,20 +4215,37 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             v.push_back(text("未检测到任何已安装语言。") | color(Color::Yellow));
             v.push_back(text("可按 Esc/←/→ 返回首页选择目标进行安装。") | dim);
         } else {
-            v.push_back(hub_menu->Render());
-        }
-        // 选中语言明细（版本 + 完整位置 + 管理来源）
-        if (!st->hub_items.empty() && st->hub_sel >= 0 &&
-            st->hub_sel < (int)st->hub_map.size()) {
-            const auto& L = st->hub_langs[st->hub_map[(size_t)st->hub_sel]];
-            v.push_back(text(""));
-            v.push_back(separator());
-            v.push_back(text(" " + L.display + " 明细：") | bold);
-            for (const auto& r : L.rows) {
-                std::string tag = r.managed ? "本工具管理" : "外部安装";
-                std::string cur = r.is_current ? "  ← 当前版本" : "";
-                v.push_back(text("  " + r.version + "    " + r.path + "  [" + tag + "]" + cur) |
-                            (r.managed ? color(Color::Green) : color(Color::GrayLight)));
+            int n = (int)st->hub_items.size();
+            int vis = std::min(n, 10);
+            int start = vis_window_start(n, st->hub_sel, vis);
+            for (int i = start; i < std::min(n, start + vis); ++i) {
+                bool selq = i == st->hub_sel;
+                std::string label = (selq ? "▶ " : "   ") + st->hub_items[i];
+                Element row = text(label);
+                if (selq) row = row | bold | color(Color::Green);
+                v.push_back(row);
+            }
+            if (n > vis)
+                v.push_back(text(sfmt("  （%d-%d / 共 %d 项，↑↓ 滚动）", start + 1,
+                                      std::min(n, start + vis), n)) |
+                            dim);
+            // 选中语言明细（版本 + 完整位置 + 管理来源；超过 6 行折叠）
+            if (st->hub_sel >= 0 && st->hub_sel < (int)st->hub_map.size()) {
+                const auto& L = st->hub_langs[st->hub_map[(size_t)st->hub_sel]];
+                v.push_back(text(""));
+                v.push_back(separator());
+                v.push_back(text(" " + L.display + " 明细：") | bold);
+                int shown = 0;
+                for (const auto& r : L.rows) {
+                    if (shown >= 6) break;
+                    std::string tag = r.managed ? "本工具管理" : "外部安装";
+                    std::string cur = r.is_current ? "  ← 当前版本" : "";
+                    v.push_back(text("  " + r.version + "    " + r.path + "  [" + tag + "]" + cur) |
+                                (r.managed ? color(Color::Green) : color(Color::GrayLight)));
+                    ++shown;
+                }
+                if ((int)L.rows.size() > 6)
+                    v.push_back(text("  … 等 " + std::to_string(L.rows.size()) + " 个版本") | dim);
             }
         }
         if (!st->hub_notes.empty()) {
@@ -4126,8 +4253,9 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             for (const std::string& n : st->hub_notes) v.push_back(text(n) | dim);
         }
         v.push_back(text(""));
-        v.push_back(text("Enter 管理 · P 体检 PATH（清理失效项） · C 清理缓存 · U 重新检测 · ←/→ 返回") |
-                    dim);
+        v.push_back(
+            text("↑↓/W S 选择 · Enter 管理 · P 体检 PATH（清理失效项） · C 清理缓存 · U 重新检测 · ←/→ 返回") |
+            dim);
         return window(text("全部已安装语言"), vbox(std::move(v)));
     });
 
@@ -4175,8 +4303,10 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             st->go(S_Hub);
             return true;
         }
-        // 管理中心：←/→/Esc 返回；热键 P/C/U
+        // 管理中心：↑↓/W S/Home/End/PgUp/PgDn 选择（路由层驱动，不再依赖 Menu 焦点）
+        // ←/→/Esc 返回；Enter 管理；热键 P/C/U
         if (st->step == S_Hub) {
+            if (list_nav_event(e, (int)st->hub_map.size(), st->hub_sel)) return true;
             if (e == Event::ArrowLeft || e == Event::ArrowRight || e == Event::Escape) {
                 st->back();
                 return true;
@@ -4218,20 +4348,28 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             }
             return true; // 其余按键吞掉，避免误触下层组件
         }
-        if (st->step == S_Installed && e.is_character()) {
-            const std::string& ch = e.character();
-            if (ch == "u" || ch == "U") {
-                st->begin_inst_detect(); // 手动重新检测
+        if (st->step == S_Installed) {
+            // ↑↓/W S/Home/End/PgUp/PgDn 选择（路由层驱动）；Enter 确认；U/O 热键
+            if (list_nav_event(e, (int)st->inst_items.size(), st->inst_sel)) return true;
+            if (e == Event::Return) {
+                st->inst_accept();
                 return true;
             }
-            if (ch == "o" || ch == "O") { // 打开目录热键：定位到“打开版本目录”项并执行
-                for (size_t i = 0; i < st->inst_actions.size(); ++i)
-                    if (st->inst_actions[i].first == AppState::IA_OPEN) {
-                        st->inst_sel = (int)i;
-                        st->inst_accept();
-                        break;
-                    }
-                return true;
+            if (e.is_character()) {
+                const std::string& ch = e.character();
+                if (ch == "u" || ch == "U") {
+                    st->begin_inst_detect(); // 手动重新检测
+                    return true;
+                }
+                if (ch == "o" || ch == "O") { // 打开目录热键：定位到“打开版本目录”项并执行
+                    for (size_t i = 0; i < st->inst_actions.size(); ++i)
+                        if (st->inst_actions[i].first == AppState::IA_OPEN) {
+                            st->inst_sel = (int)i;
+                            st->inst_accept();
+                            break;
+                        }
+                    return true;
+                }
             }
         }
         if (st->step == S_Version) {
@@ -4495,7 +4633,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     Component layout = Renderer(router, [st, router]() -> Element {
         Element head = window(
             text(" Environ Manage（环境管理器）   By:Ming-QWQ520(明) "),
-            hbox({text(" 统一多版本布局: <安装目录>\\<版本> · Ctrl+C 复制选中文字 ") | dim,
+            hbox({text(" 多版本: JDK/Python/Node.js · 其余单版本平铺 · Ctrl+C 复制选中文字 ") | dim,
                   filler(),
                   text(std::string(step_tag(st->step)) + " ") | dim}));
         Element foot =

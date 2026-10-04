@@ -29,6 +29,7 @@ std::string zig_arch_key() {
 } // namespace
 
 std::string ZigProvider::id() const { return "zig"; }
+bool ZigProvider::multi_version() const { return false; }
 std::string ZigProvider::display() const { return "Zig"; }
 
 bool ZigProvider::list_versions(std::vector<VersionInfo>& out, std::string& err) {
