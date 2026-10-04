@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="RustInstall/RustInstall.vcxproj" Id="d4b4143e-9500-42c0-a3da-9db9b944525e" />
+</Solution>

@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------
+# Environ Manage (.gitignore)
+# 只排除"非项目源码"的生成物与开发临时文件；仓库内保留纯源码。
+# ---------------------------------------------------------------
+
+# ---- Visual Studio / MSBuild 构建产物与缓存 ----
+.vs/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ARM64/
+*.user
+*.suo
+*.sdf
+*.opendb
+*.db
+*.ipch
+*.aps
+*.pch
+*.tlog
+*.iobj
+*.ipdb
+*.ilk
+*.exp
+*.pdb
+*.exe
+*.dll
+*.lib
+*.obj
+
+# ---- 运行时生成：日志与下载缓存 ----
+log/
+cache/
+*.log
+
+# ---- 开发过程的一次性修补脚本（非项目源码）----
+patch_*.py
+fix_*.py

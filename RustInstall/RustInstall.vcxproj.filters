@@ -1,0 +1,362 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="third_party\ftxui">
+      <UniqueIdentifier>{f7c10001-1111-4a7b-9b2c-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party\ftxui\src\ftxui\component">
+      <UniqueIdentifier>{f7c10001-1111-4a7b-9b2c-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party\ftxui\src\ftxui\dom">
+      <UniqueIdentifier>{f7c10001-1111-4a7b-9b2c-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party\ftxui\src\ftxui\screen">
+      <UniqueIdentifier>{f7c10001-1111-4a7b-9b2c-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party\ftxui\src\ftxui\util">
+      <UniqueIdentifier>{f7c10001-1111-4a7b-9b2c-000000000005}</UniqueIdentifier>
+    </Filter>
+    <ClCompile Include="providers/provider.cpp">
+      <Filter>providers\provider.cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/node/node_provider.cpp">
+      <Filter>providers\node</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/jdk/jdk_provider.cpp">
+      <Filter>providers\jdk</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/go/go_provider.cpp">
+      <Filter>providers\go</Filter>
+    </ClCompile>
+    <ClCompile Include="providers/dotnet/dotnet_provider.cpp">
+      <Filter>providers\dotnet</Filter>
+    </ClCompile>
+    <ClInclude Include="providers/provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/registry.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/http_client.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/archive.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/checksum.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="platform/platform.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/node/node_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/jdk/jdk_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/go/go_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <ClInclude Include="providers/dotnet/dotnet_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
+    <Filter Include="providers">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\node">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\jdk">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\go">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\dotnet">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\headers">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-000000000006}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="RustInstall.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\animation.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\app.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\button.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\catch_event.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\checkbox.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\collapsible.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\component.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\component_options.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\container.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\dropdown.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\event.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\hoverable.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\input.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\loop.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\maybe.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\menu.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\modal.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\radiobox.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\renderer.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\resizable_split.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\slider.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\task.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\task_queue.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\task_runner.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\terminal_input_parser.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\util.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\component\window.cpp">
+      <Filter>third_party\ftxui\ftxui\component</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\automerge.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\blink.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\bold.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\border.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\box_helper.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\canvas.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\clear_under.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\color.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\composite_decorator.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\dbox.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\dim.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\flex.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\flexbox.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\flexbox_config.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\flexbox_helper.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\focus.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\frame.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\gauge.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\graph.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\gridbox.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\hbox.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\hyperlink.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\inverted.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\italic.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\linear_gradient.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\node.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\node_decorator.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\paragraph.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\reflect.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\scroll_indicator.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\selection.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\selection_style.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\separator.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\size.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\spinner.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\strikethrough.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\table.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\text.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\underlined.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\underlined_double.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\util.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\dom\vbox.cpp">
+      <Filter>third_party\ftxui\ftxui\dom</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\box.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\color.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\color_info.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\screen.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\string.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\surface.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\screen\terminal.cpp">
+      <Filter>third_party\ftxui\ftxui\screen</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\ftxui\src\ftxui\util\ref.cpp">
+      <Filter>third_party\ftxui\ftxui\util</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="strutil.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="sha256.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="json.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="logger.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="toml_lite.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="http.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="console_ui.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="github.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="rust_dist.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
