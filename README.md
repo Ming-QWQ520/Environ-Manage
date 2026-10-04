@@ -38,6 +38,26 @@ msbuild RustInstall\RustInstall.vcxproj /p:Configuration=Release /p:Platform=x64
 
 ---
 
+## 下载编译版（GitHub Releases 自动构建）
+
+仓库内置 GitHub Actions 自动编译流水线（`.github/workflows/release.yml`），无需本地安装 Visual Studio 即可获取 Release 版可执行文件：
+
+- **推送 tag（`v*`）**：构建 x64 / x86 双平台 Release，并创建带版本号的正式版本 Release；
+- **推送 `main` / `WIP` 分支**：自动构建并滚动更新 **[最新编译版本](https://github.com/Ming-QWQ520/Environ-Manage/releases/latest)**（Release 标题中标注 build 编号与提交哈希）；
+- **手动触发**：在 Actions 页面运行 "Release 编译发布"，可选择是否发布为最新编译版本；
+- 附件统一附带 `SHA256SUMS.txt` 校验和；每个 zip 内含 `RustInstall.exe`、`LICENSE`、`README.md`。
+
+最新编译版的固定下载链接（始终指向最近一次自动构建）：
+
+```text
+https://github.com/Ming-QWQ520/Environ-Manage/releases/latest/download/Environ-Manage-latest-x64.zip
+https://github.com/Ming-QWQ520/Environ-Manage/releases/latest/download/Environ-Manage-latest-x86.zip
+```
+
+> 流水线首选 VS 2026 (v145) 工具集编译，若 runner 未安装 VS 2026 会自动回退 v143 (VS 2022)，两种环境产出的均为独立单文件 exe，无第三方运行时依赖。
+
+---
+
 ## 使用
 
 ### TUI 交互模式（无参数启动）

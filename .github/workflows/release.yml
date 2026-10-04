@@ -1,0 +1,231 @@
+# ============================================================================
+# Environ Manage —— GitHub Actions Release 编译流水线
+#
+# 触发方式：
+#   1. 推送 tag（v*）            → 构建 x64 / x86 双平台 Release，创建正式版本 Release
+#   2. 推送 main / WIP 分支      → 构建 Release，滚动更新「最新编译版本」(latest Release)
+#   3. workflow_dispatch 手动触发 → 构建 Release，可选发布为「最新编译版本」
+#
+# 说明：
+#   - 项目为 C++20 / MSVC 控制台程序（TUI 基于 FTXUI，已内置源码，随流水线一起编译）；
+#   - 首选 VS 2026 (v145) 工具集；若 runner 未安装 VS 2026，自动回退 v143 (VS 2022)；
+#   - 发布产物：Environ-Manage-<版本>-x64.zip / -x86.zip + SHA256SUMS.txt；
+#   - 「最新编译版本」使用固定 tag `latest` 滚动更新，附件文件名固定，
+#     恒定下载链接形如：releases/latest/download/Environ-Manage-latest-x64.zip
+# ============================================================================
+
+name: Release 编译发布
+
+on:
+  push:
+    branches: [main, WIP]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '构建后发布为最新编译版本（latest Release）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# 同一分支/tag 的连续推送只保留最新一次构建，避免排队浪费与过期发布
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: Environ-Manage
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 阶段一：Release 编译（x64 / Win32 双平台并行）
+  # --------------------------------------------------------------------------
+  build:
+    name: Release 编译（${{ matrix.platform }}）
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            arch: x64
+          - platform: Win32
+            arch: x86
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v5
+
+      - name: 配置 MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: 检测 MSVC 工具集（无 VS 2026 时自动回退 v143）
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path (${env:ProgramFiles(x86)}) 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $ver = ''
+          if (Test-Path $vswhere) {
+            $ver = & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationVersion | Select-Object -First 1
+          }
+          Write-Host "检测到 Visual Studio 版本：$ver"
+          $hasV145 = $false
+          if ($ver) {
+            try { $hasV145 = ([version]$ver).Major -ge 18 } catch { $hasV145 = $false }
+          }
+          if ($hasV145) {
+            Write-Host '使用 VS 2026 (v145) 工具集，无需回退。'
+          } else {
+            Write-Host '::warning::未检测到 VS 2026 (v145 工具集)，自动回退为 v143 (VS 2022)'
+            $proj = 'RustInstall/RustInstall.vcxproj'
+            (Get-Content $proj) -replace '>v145<', '>v143<' | Set-Content $proj
+            Write-Host '回退后工具集：'
+            Select-String -Path $proj -Pattern 'PlatformToolset' | ForEach-Object { Write-Host $_.Line.Trim() }
+          }
+
+      - name: 编译 Release（${{ matrix.platform }}）
+        run: msbuild RustInstall\RustInstall.vcxproj /p:Configuration=Release /p:Platform=${{ matrix.platform }} /m /nologo /v:m
+
+      - name: 收集编译产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $exe = Get-ChildItem -Path . -Recurse -Filter RustInstall.exe |
+            Where-Object { $_.FullName -notmatch '\\(obj|dist)\\' } |
+            Select-Object -First 1
+          if (-not $exe) { throw '未找到编译产物 RustInstall.exe' }
+          Write-Host ("编译产物：{0}（{1} MB）" -f $exe.FullName, [math]::Round($exe.Length / 1MB, 2))
+          Copy-Item $exe.FullName "dist/RustInstall-${{ matrix.arch }}.exe"
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustInstall-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # 阶段二：发布 Release（tag → 正式版本；分支推送 / 手动 → 滚动 latest）
+  # --------------------------------------------------------------------------
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'push' && github.ref_type == 'branch') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish)
+    steps:
+      - name: 检出源码（完整历史，用于生成更新日志）
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 打包与生成校验和
+        env:
+          APP_NAME: Environ-Manage
+        run: |
+          set -euo pipefail
+
+          IS_TAG="false"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            IS_TAG="true"
+          fi
+          if [[ "${IS_TAG}" == "true" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="latest"
+          fi
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BUILD_TIME="$(date -u '+%Y-%m-%d %H:%M UTC')"
+
+          mkdir -p dist
+          for arch in x64 x86; do
+            pkg="${APP_NAME}-${VERSION}-${arch}"
+            rm -rf "${pkg}"
+            mkdir -p "${pkg}"
+            cp "artifacts/RustInstall-${arch}/RustInstall-${arch}.exe" "${pkg}/RustInstall.exe"
+            cp LICENSE "${pkg}/LICENSE"
+            cp README.md "${pkg}/README.md"
+            zip -qr "dist/${pkg}.zip" "${pkg}"
+          done
+          ( cd dist && sha256sum ./*.zip | sed 's| \./| |' > SHA256SUMS.txt )
+
+          echo "IS_TAG=${IS_TAG}"   >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "SHORT_SHA=${SHORT_SHA}"   >> "${GITHUB_ENV}"
+          echo "BUILD_TIME=${BUILD_TIME}" >> "${GITHUB_ENV}"
+          ls -la dist
+
+      - name: 生成发布说明
+        run: |
+          set -euo pipefail
+          {
+            if [[ "${IS_TAG}" == "true" ]]; then
+              echo "## ${APP_NAME} ${VERSION}"
+              echo
+              echo "正式发布版本：x64 与 x86 (Win32) 双平台 Release 编译，C++20 / MSVC，内置 FTXUI，无第三方运行时依赖。"
+            else
+              echo "## 最新编译版本（build #${GITHUB_RUN_NUMBER}）"
+              echo
+              echo "- 构建来源：\`${GITHUB_REF_NAME}\` @ \`${SHORT_SHA}\`"
+              echo "- 构建时间：${BUILD_TIME}"
+              echo "- 固定下载链接（每次自动构建后更新）："
+              echo "  - x64：https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${APP_NAME}-latest-x64.zip"
+              echo "  - x86：https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${APP_NAME}-latest-x86.zip"
+            fi
+            echo
+            echo "### 附件"
+            echo
+            echo "| 文件 | 说明 |"
+            echo "| --- | --- |"
+            echo "| ${APP_NAME}-${VERSION}-x64.zip | 64 位（x64），内含 RustInstall.exe / LICENSE / README.md |"
+            echo "| ${APP_NAME}-${VERSION}-x86.zip | 32 位（Win32 / x86），内含 RustInstall.exe / LICENSE / README.md |"
+            echo "| SHA256SUMS.txt | 全部附件的 SHA-256 校验和 |"
+            echo
+            echo "### 最近提交"
+            echo
+            git log --oneline -12 | sed 's/^/- /'
+          } > release_notes.md
+          cat release_notes.md
+
+      # —— tag 推送：创建正式版本 Release（tag 已随 push 存在）——
+      - name: 发布正式版本（tag）
+        if: env.IS_TAG == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_NAME: Environ-Manage
+        run: |
+          set -euo pipefail
+          gh release create "${VERSION}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${APP_NAME} ${VERSION}" \
+            --notes-file release_notes.md \
+            --verify-tag
+
+      # —— 分支推送 / 手动触发：滚动更新「最新编译版本」（tag=latest）——
+      - name: 发布最新编译版本（latest 滚动更新）
+        if: env.IS_TAG != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_NAME: Environ-Manage
+        run: |
+          set -euo pipefail
+          # 删除旧的 latest Release 及其 tag，保证滚动指向本次构建
+          gh release delete latest --yes --cleanup-tag \
+            --repo "${GITHUB_REPOSITORY}" 2>/dev/null || true
+          gh release create latest dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "最新编译版本（build #${GITHUB_RUN_NUMBER}）" \
+            --notes-file release_notes.md \
+            --target "${GITHUB_SHA}" \
+            --latest
