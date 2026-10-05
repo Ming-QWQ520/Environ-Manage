@@ -1621,8 +1621,11 @@ inline fs::path find_local_archive(const fs::path& dir, const std::string& ver) 
 }
 
 // 版本名自然比较（数字段按数值比较）：支持 "3.12.6" / "v22.14.0" / "go1.22.0" / "21.0.12+7"
+// 前导 v/V（后跟数字）仅为版本标记，比较时跳过，保证 "v1.12.13" 与 "3.47.6"、"v22.14.0"
+// 与 "22.14.0"（--version 捕获值常无 v）两两比较结果一致
 inline int ver_natural_cmp(const std::string& a, const std::string& b) {
-    size_t i = 0, j = 0;
+    size_t i = a.size() > 1 && (a[0] == 'v' || a[0] == 'V') && isdigit((unsigned char)a[1]) ? 1 : 0;
+    size_t j = b.size() > 1 && (b[0] == 'v' || b[0] == 'V') && isdigit((unsigned char)b[1]) ? 1 : 0;
     while (i < a.size() && j < b.size()) {
         if (isdigit((unsigned char)a[i]) && isdigit((unsigned char)b[j])) {
             size_t i2 = i, j2 = j;
