@@ -14,8 +14,9 @@
 namespace gh {
 
 struct RepoAsset {
-    std::string name; // 资产文件名
-    std::string url;  // browser_download_url 直链
+    std::string name;   // 资产文件名
+    std::string url;    // browser_download_url 直链
+    std::string digest; // GitHub 官方摘要（"sha256:…"，部分资产可用；空 = 未知）
     uint64_t size = 0;
 };
 
@@ -52,6 +53,12 @@ inline bool parse_repo_releases(const std::string& body, std::vector<RepoRelease
                 sa.url = a.get("browser_download_url")
                              ? a.get("browser_download_url")->str_or()
                              : std::string();
+                sa.digest = a.get("digest") ? a.get("digest")->str_or() : std::string();
+                // 仅接受 sha256 摘要（前缀剥出 hex 部分）
+                if (su::lower(sa.digest).rfind("sha256:", 0) == 0)
+                    sa.digest = sa.digest.substr(7);
+                else
+                    sa.digest.clear();
                 sa.size = (uint64_t)(a.get("size") ? a.get("size")->num : 0);
                 if (!sa.name.empty() && !sa.url.empty()) r.assets.push_back(std::move(sa));
             }

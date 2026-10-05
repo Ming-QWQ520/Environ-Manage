@@ -40,7 +40,7 @@ struct Artifact {
     std::string version;    // 具体版本号（如 21.0.12+1 / 8.0.425 / v22.14.0 / go1.22.0）
     std::string filename;
     std::string url;        // 官方直链
-    std::string sha256, md5;
+    std::string sha256, sha512, md5;
     uint64_t size = 0;
 };
 
@@ -65,8 +65,20 @@ public:
 
     // ---- 安装布局 ----
     // 多版本（JDK/Node.js）： <root>\<版本> + current junction，支持共存/切换/按版本卸载
-    // 单版本平铺（Go/.NET/Zig/PHP/Ruby/Git）：直接安装于 <root>，更新即覆盖，卸载删整个根目录
+    // 单版本平铺（Go/.NET/Zig/PHP/Ruby/Git/Flutter）：直接安装于 <root>，更新即覆盖，卸载删整个根目录
     virtual bool multi_version() const { return true; }
+
+    // ---- 可选下载镜像站（非空时确认页提供 M 键切换；选择由实现持久化记忆） ----
+    virtual std::vector<std::string> mirror_options() const { return {}; }
+    virtual int mirror_selected() const { return 0; }
+    virtual void set_mirror_selected(int) {}
+
+    // ---- 镜像相关用户环境变量 ----
+    // 安装成功后由调用方设置（值空 = 清除该变量，如选择官方源时清除镜像指向）
+    virtual std::vector<std::pair<std::string, std::string>> mirror_env_vars() const
+        { return {}; }
+    // 卸载时额外清理的用户环境变量名（无论当前选择如何都尝试删除）
+    virtual std::vector<std::string> env_cleanup_names() const { return {}; }
 
     // ---- 布局描述（多版本：current 下相对路径；平铺：根目录下相对路径） ----
     virtual std::string bin_subdir() const = 0;                                // PATH 子目录

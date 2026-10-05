@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 
 namespace sha256 {
@@ -92,19 +93,36 @@ inline std::string hex(Ctx c) {
     return std::string(out, 64);
 }
 
-// 计算文件摘要；失败时返回空串
-inline std::string file_hex(const std::wstring& path) {
+// 带进度回调版本（done/total 为已读/总字节数；total 未知时为 0）
+inline std::string file_hex_progress(const std::wstring& path,
+                                     const std::function<void(uint64_t, uint64_t)>& progress) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return {};
+    uint64_t total = 0;
+    if (progress) {
+        _fseeki64(f, 0, SEEK_END);
+        total = (uint64_t)_ftelli64(f);
+        _fseeki64(f, 0, SEEK_SET);
+    }
     Ctx c;
     reset(c);
     std::string chunk(1 << 20, '\0');
+    uint64_t done = 0;
     size_t n;
-    while ((n = fread(chunk.data(), 1, chunk.size(), f)) > 0) update(c, chunk.data(), n);
+    while ((n = fread(chunk.data(), 1, chunk.size(), f)) > 0) {
+        update(c, chunk.data(), n);
+        done += n;
+        if (progress) progress(done, total);
+    }
     bool bad = ferror(f) != 0;
     fclose(f);
     if (bad) return {};
     return hex(c);
+}
+
+// 计算文件摘要；失败时返回空串
+inline std::string file_hex(const std::wstring& path) {
+    return file_hex_progress(path, {});
 }
 
 } // namespace sha256

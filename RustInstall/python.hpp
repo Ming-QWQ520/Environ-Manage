@@ -23,6 +23,7 @@
 #include "logger.hpp"
 #include "md5.hpp"
 #include "providers/archive.hpp"
+#include "providers/checksum.hpp" // checksum::g_hash_progress（SHA-256 计算进度回调）
 #include "rust_dist.hpp" // dist::run_hidden
 #include "sha256.hpp"
 #include "strutil.hpp"
@@ -522,7 +523,7 @@ inline bool download(const PyFile& f, int mirror_hint, const fs::path& dest,
 
 inline bool verify(const PyFile& f, const fs::path& dest, std::string& err) {
     if (!f.sha256.empty()) {
-        std::string got = sha256::file_hex(dest.wstring());
+        std::string got = sha256::file_hex_progress(dest.wstring(), checksum::g_hash_progress);
         if (got.empty() || su::lower(got) != su::lower(f.sha256)) {
             err = "SHA-256 校验失败: 期望 " + f.sha256 + " 实际 " +
                   (got.empty() ? "(读取失败)" : got);

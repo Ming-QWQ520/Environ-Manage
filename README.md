@@ -12,7 +12,8 @@
   `<安装目录>`（如 `D:\Git\cmd\git.exe`），更新即覆盖、卸载删整个目录。
   所有语言均自动检测已装版本与位置，支持安装/更新/卸载。
 - **国内网络友好**：GitHub API 经 gh-proxy 加速，安装包走中科大 / 上交 / 华为云 / npmmirror / 阿里云等镜像，失败自动切换，全程支持断点续传。
-- **完整性校验**：SHA-256 / MD5 校验和验证 + 下载字节数比对，校验和缺失时降级为大小校验。
+- **完整性校验**：SHA-256 / SHA-512 / MD5 校验和验证 + 下载字节数比对，校验和缺失时降级为大小校验；
+  大文件哈希计算实时显示进度与速率
 
 ---
 
@@ -25,12 +26,12 @@
 | **Node.js** | `nodejs.org/dist/index.json` | npmmirror（同格式） | `SHASUMS256.txt` |
 | **JDK (Temurin)** | Adoptium v3 API（`available_releases` + `feature_releases/<major>/ga`） | GitHub 直链走 gh-proxy | API 自带 SHA-256 |
 | **Go** | `go.dev/dl/?mode=json&include=all` | golang.google.cn / 阿里云 | `files.sha256` |
-| **.NET** | `builds.dotnet.microsoft.com` `release-metadata/releases-index.json` | 官方 CDN | 无官方校验和，按下载字节数与 `Content-Length` 比对 |
+| **.NET** | `builds.dotnet.microsoft.com` `release-metadata/releases-index.json` | 官方 CDN | 通道详情自带 SHA-512 → 大小比对 |
 | **Zig** | `ziglang.org/download/index.json`（JSON 索引，自带 SHA-256） | 中科大 / npmmirror / 官方 | 索引自带 SHA-256 |
 | **PHP** | `windows.php.net` 官方目录解析（releases + archives） | 官方 releases → archives 回退 | `sha256.sum` → 大小比对 |
-| **Ruby** | `oneclick/rubyinstaller2` GitHub Releases（.7z） | gh-proxy 加速 → 直连 | 大小比对（官方无独立校验和） |
+| **Ruby** | `oneclick/rubyinstaller2` GitHub Releases（.7z） | gh-proxy 加速 → 直连 | GitHub API digest SHA-256 → 大小比对 |
 | **Git** | `git-for-windows/git` GitHub Releases（Git For Windows 便携版 MinGit 包） | gh-proxy 加速 → 直连 | 官方 `.sha256` → 大小比对 |
-| **Flutter** | Flutter 官方 `releases_windows.json` 发布索引（仅 stable 通道） | flutter-io.cn / npmmirror / 官方 | 索引自带 SHA-256 |
+| **Flutter** | Flutter 官方 `releases_windows.json` 发布索引（仅 stable 通道） | 四站可选：官方 / 清华 TUNA / 中科大 USTC / flutter-io.cn（M 键切换，失败自动回退） | 索引自带 SHA-256 |
 
 ---
 
@@ -96,14 +97,16 @@ Zig / PHP / Ruby / Git / Flutter 走"已安装检测"屏，可执行安装/更�
 - `Enter`：确认
 - **`Esc` 或退格：返回上一步**（历史栈导航，第一步再返回即退出）
 - 版本列表支持输入关键字搜索（Python / SDK）
-- 确认页 `M`：循环切换镜像（自动 → 官方 → 中科大 → 上交）
+- 确认页 `M`：循环切换镜像（自动 → 官方 → 中科大 → 上交）；**Flutter 确认页 `M`：
+  循环切换下载镜像站（官方 / 清华 TUNA / 中科大 USTC / Flutter 中国社区旧镜像），
+  选择自动记忆，下载失败自动回退其余镜像站**
 - 下载中 `Esc`：取消下载（保留已下载部分，下次自动断点续传）
 - 完成页 `Esc`：返回主界面重新选择
-- **安装过程可视化**：执行中显示步骤条（下载 → 校验 → 解压 → 配置 → 完成，
-  √ 已完成 / ▶ 当前 / 待办）与实时进度条 —— 下载阶段为下载速度，解压阶段为
-  **解压速度与总进度**（zip / tar.gz / tar.xz 按压缩包元数据精确计算解压后总大小，
-  其余格式按压缩包大小估算并以实际解压体积为准）；脚本模式同步输出 \r 进度行与
-  解压完成汇总（体积 + 平均速度）
+- **安装过程可视化**：执行中显示步骤条（下载 → **哈希验证** → 解压 → 配置 → 完成，
+  √ 已完成 / ▶ 当前 / 待办）与实时进度条 —— 下载阶段为下载速度，**哈希验证阶段为
+  SHA-256/512 计算进度与速率**，解压阶段为**解压速度与总进度**（zip / tar.gz / tar.xz
+  按压缩包元数据精确计算解压后总大小，其余格式按压缩包大小估算并以实际解压体积为准）；
+  脚本模式同步输出 \r 进度行与解压完成汇总（体积 + 平均速度）
 
 所有面板仅整屏绘制一次，之后原位刷新，选择过程无闪屏。
 
@@ -135,7 +138,7 @@ Python 管理:
       --py-token <Token>   可选：python.org API Token（元数据增强，匿名 API 已限流）
 
 SDK 管理:
-      --sdk <id>           node / jdk / go / dotnet / zig / php / ruby / git
+      --sdk <id>           node / jdk / go / dotnet / zig / php / ruby / git / flutter
       --sdk-list           仅列出该 SDK 的版本后退出
       --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）
       Node.js 工具链（优先级: npm/npx 随装自带 → Corepack 开关 → pnpm/yarn）:
@@ -143,8 +146,11 @@ SDK 管理:
       --with-yarn          node 安装后经 Corepack 全局安装 yarn
       --corepack <开关>    enable（默认，启用 Corepack 管理 pnpm/yarn）/ disable
       --pnpm-home <目录>   pnpm/npm 存储根目录（默认 <目录>\pnpm-repository）
+      Flutter 下载镜像站（默认记忆上次选择，亦可 TUI 确认页 M 键切换）:
+      --flutter-mirror <站> official / tuna / ustc / cn（默认社区镜像）；亦可填 0-3
+                           安装后按所选镜像设置 PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL
       布局: node/jdk 多版本 <目录>\<版本> + <目录>\current junction；
-            go/dotnet/zig/php/ruby/git 单版本平铺（直接安装于 <目录>）
+            go/dotnet/zig/php/ruby/git/flutter 单版本平铺（直接安装于 <目录>）
 
 卸载（批处理）:
       --uninstall [版本|all]
@@ -201,8 +207,10 @@ RustInstall.exe --sdk ruby -p D:\Sdk
 :: 安装 Git For Windows 便携版（MinGit 官方精简包解压即用）
 RustInstall.exe --sdk git -p D:\Sdk
 
-:: 安装 Flutter 最新稳定版（flutter-io.cn / npmmirror 镜像自动切换，Dart SDK 随装自带）
+:: 安装 Flutter 最新稳定版（默认 Flutter 中国社区旧镜像，可选四站并自动回退）
 RustInstall.exe --sdk flutter -p D:\Flutter
+:: 指定清华 TUNA 镜像（安装后同步设置 TUNA 的 PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL）
+RustInstall.exe --sdk flutter -p D:\Flutter --flutter-mirror tuna
 ```
 
 ---
@@ -292,9 +300,23 @@ TUI 选择目标或 `--sdk <id>` 进入，九个 SDK 走统一的 Provider 接�
   PATH 立即生效）与**打开安装目录**（`O` 键）；无已装版本时不显示已安装列表区块；
   批处理用 `--uninstall [版本|all]`
 - **校验**：Node 用 `SHASUMS256.txt`；JDK 用 API 自带的 SHA-256；Go 用 `files.sha256`；
-  .NET 无校验和，由下载字节数与 `Content-Length` 比对保证
+  .NET 用通道详情的官方 SHA-512；Ruby / Git 优先 GitHub API 资产 digest（SHA-256），
+  均不可用时降级大小比对；哈希计算过程实时显示进度
 - **镜像**：Node 走 npmmirror、Go 走阿里云/国内官方、JDK 的 GitHub 直链走 gh-proxy 加速，
-  失败自动回退官方源
+  失败自动回退官方源；
+- **Flutter 镜像站（`--sdk flutter`）**：四站可选，确认页 `M` 键循环切换或
+  `--flutter-mirror official|tuna|ustc|cn` 指定，选择自动记忆（注册表），下载失败自动回退其余站：
+
+  | 镜像站 | PUB_HOSTED_URL | FLUTTER_STORAGE_BASE_URL |
+  | --- | --- | --- |
+  | 清华大学 TUNA | `https://mirrors.tuna.tsinghua.edu.cn/dart-pub` | `https://mirrors.tuna.tsinghua.edu.cn/flutter` |
+  | 中科大 USTC | `https://mirrors.ustc.edu.cn/dart-pub` | `https://mirrors.ustc.edu.cn/flutter` |
+  | Flutter 中国社区旧镜像（默认） | `https://pub.flutter-io.cn` | `https://storage.flutter-io.cn` |
+  | 官方源 | 不设置（如存在旧镜像变量则自动清除） | 同左 |
+
+  版本索引 JSON 与 SDK 压缩包同源优先走所选镜像；安装完成后自动把所选镜像的
+  `PUB_HOSTED_URL` / `FLUTTER_STORAGE_BASE_URL` 写入用户环境变量（`flutter` / `dart pub`
+  工具链同步走镜像），选官方源时自动清除，卸载 Flutter 时一并清理
 - **Node 工具链（`--sdk node`）**：按优先级模型统一管理，安装完成后自动检测并显示各工具版本：
   1. **npm / npx**：随 Node.js 安装自动附带，不做任何安装动作，只检测并显示版本；
   2. **Corepack**：Node 内置，提供“启用/禁用”开关（`--corepack enable|disable`、TUI 确认页 `C` 键），

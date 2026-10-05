@@ -185,6 +185,10 @@ bool uninstall_version(Provider& p, const fs::path& root, const std::string& ver
             std::string e2;
             platform::remove_user_env(ev.first, e2);
         }
+        for (auto& n : p.env_cleanup_names()) { // 镜像变量等附加清理（如 Flutter 镜像指向）
+            std::string e2;
+            platform::remove_user_env(n, e2);
+        }
         platform::managed_remove_root(p.id(), root);
         logx::linef("已卸载 %s（%s）", p.display().c_str(), version.c_str());
         return true;
@@ -251,6 +255,10 @@ bool uninstall_version(Provider& p, const fs::path& root, const std::string& ver
     for (auto& ev : p.env_literals()) {
         std::string e2;
         platform::remove_user_env(ev.first, e2);
+    }
+    for (auto& n : p.env_cleanup_names()) {
+        std::string e2;
+        platform::remove_user_env(n, e2);
     }
     platform::managed_remove_root(p.id(), root);
     return true;

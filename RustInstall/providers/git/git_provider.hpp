@@ -24,7 +24,8 @@ public:
 
 private:
     bool ensure_list(std::string& err);
-    std::map<std::string, std::string> url_of_; // 版本 id → 资产直链
+    std::map<std::string, std::string> url_of_;    // 版本 id → 资产直链
+    std::map<std::string, std::string> digest_of_; // 版本 id → GitHub 官方 SHA-256（可能为空）
 };
 
 } // namespace prov

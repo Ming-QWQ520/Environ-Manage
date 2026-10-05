@@ -18,6 +18,42 @@ namespace {
 const char* kIndexUrl =
     "https://builds.dotnet.microsoft.com/dotnet/release-metadata/releases-index.json";
 
+// 通道详情 JSON（release-metadata/<channel>/releases.json）：
+// releases[].release-version == sdkv → sdk.files[]（rid=win-<arch> 且 .zip）→ hash（SHA-512，
+// 128 个十六进制字符）；无网络/无缓存/未命中时返回空串，校验退回大小比对
+std::string fetch_sdk_sha512(const std::string& channel, const std::string& sdkv,
+                             const std::string& arch) {
+    std::string url = "https://builds.dotnet.microsoft.com/dotnet/release-metadata/" +
+                      channel + "/releases.json";
+    std::string perr;
+    std::string body = httpc::strip_bom(httpc::get_cached(url, perr));
+    if (body.empty()) {
+        logx::line("获取 .NET 通道详情失败（SHA-512 预校验不可用）: " + perr);
+        return {};
+    }
+    json::Val root;
+    if (!json::Parser(body).parse(root, perr) || root.t != json::Val::Obj) return {};
+    const json::Val* rels = root.get("releases");
+    if (!rels || rels->t != json::Val::Arr) return {};
+    for (const json::Val& r : rels->arr) {
+        std::string rv = r.get("release-version") ? r.get("release-version")->str_or() : "";
+        if (rv != sdkv) continue;
+        const json::Val* sdk = r.get("sdk");
+        if (!sdk || sdk->t != json::Val::Obj) continue;
+        const json::Val* files = sdk->get("files");
+        if (!files || files->t != json::Val::Arr) continue;
+        for (const json::Val& f : files->arr) {
+            std::string rid = f.get("rid") ? f.get("rid")->str_or() : "";
+            std::string name = f.get("name") ? f.get("name")->str_or() : "";
+            std::string hash = f.get("hash") ? f.get("hash")->str_or() : "";
+            if (rid == "win-" + arch && su::ends_with(name, ".zip") && hash.size() == 128)
+                return hash;
+        }
+    }
+    logx::line("通道详情中未找到该 SDK zip 的 SHA-512，退回大小比对");
+    return {};
+}
+
 bool load_index(std::vector<json::Val>& out, std::string& err) {
     std::string body = httpc::strip_bom(httpc::get_cached(kIndexUrl, err));
     if (body.empty()) {
@@ -97,6 +133,7 @@ bool DotnetProvider::resolve(const std::string& version_id, Artifact& out, std::
         out.version = sdkv;
         out.filename = "dotnet-sdk-" + sdkv + "-win-" + arch + ".zip";
         out.url = "https://builds.dotnet.microsoft.com/dotnet/Sdk/" + sdkv + "/" + out.filename;
+        out.sha512 = fetch_sdk_sha512(version_id, sdkv, arch); // 官方 SHA-512（可用时硬校验）
         logx::linef(".NET %s → %s", version_id.c_str(), sdkv.c_str());
         return true;
     }
@@ -110,6 +147,7 @@ std::vector<std::pair<std::string, std::wstring>> DotnetProvider::mirrors(const 
 }
 
 bool DotnetProvider::verify(const Artifact& a, const fs::path& dest, std::string& err) {
+    // release-metadata 提供官方 SHA-512 时硬校验；否则退回大小比对
     return checksum::artifact_ok(a, dest, err);
 }
 

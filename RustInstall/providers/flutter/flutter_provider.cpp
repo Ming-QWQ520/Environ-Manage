@@ -2,14 +2,17 @@
 // 版本源：https://storage.googleapis.com/flutter_infra_release/releases/releases_windows.json
 //   { base_url, current_release{stable,beta,dev}, releases[ {hash, channel, version,
 //     release_date, archive, sha256} ] }，archive 为相对 base_url 的路径
-// 仅枚举 stable 通道；下载镜像：flutter-io.cn / npmmirror / 官方，自动回退
+// 仅枚举 stable 通道；下载镜像站可选（官方 / 清华 TUNA / 中科大 USTC / 中国社区旧镜像），
+// 所选站优先下载，失败自动回退其余镜像；索引 JSON 同样优先走所选镜像
 #include "flutter_provider.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 
 #include "../../json.hpp"
+#include "../../platform/platform.hpp"
 #include "../../providers/archive.hpp"
 #include "../../providers/checksum.hpp"
 #include "../../providers/http_client.hpp"
@@ -25,9 +28,40 @@ const char* kBaseFallback =
     "https://storage.googleapis.com/flutter_infra_release/releases";
 const char* kArchiveMarker = "flutter_infra_release/releases/";
 
-// 拉取并解析 releases_windows.json（get_cached 带本地缓存）
-bool load_index(json::Val& root, std::string& err) {
-    std::string body = httpc::get_cached(kIndexUrl, err);
+// ---- 镜像站（SDK 下载 base + 用户环境变量） ----
+// storage：flutter_infra_release 的各站等效 base（拼 /releases/releases_windows.json 索引
+// 与 /releases/<archive> SDK zip）；TUNA/USTC 的 FLUTTER_STORAGE_BASE_URL 本身即该映射根；
+// flutter-io.cn 官方同步路径为 storage.flutter-io.cn/flutter_infra_release
+// env_pub / env_storage：按镜像站官方说明写入用户环境变量（空 = 官方源，安装后清除变量）
+struct FlutterMirror {
+    const char* name;
+    const char* storage;
+    const char* env_pub;     // PUB_HOSTED_URL
+    const char* env_storage; // FLUTTER_STORAGE_BASE_URL
+};
+const FlutterMirror kFlutterMirrors[] = {
+    {"官方源 storage.googleapis.com", "https://storage.googleapis.com/flutter_infra_release",
+     "", ""},
+    {"清华大学 TUNA", "https://mirrors.tuna.tsinghua.edu.cn/flutter",
+     "https://mirrors.tuna.tsinghua.edu.cn/dart-pub",
+     "https://mirrors.tuna.tsinghua.edu.cn/flutter"},
+    {"中科大 USTC", "https://mirrors.ustc.edu.cn/flutter",
+     "https://mirrors.ustc.edu.cn/dart-pub", "https://mirrors.ustc.edu.cn/flutter"},
+    {"Flutter 中国社区旧镜像", "https://storage.flutter-io.cn/flutter_infra_release",
+     "https://pub.flutter-io.cn", "https://storage.flutter-io.cn"},
+};
+constexpr int kFlutterMirrorCount = (int)(sizeof(kFlutterMirrors) / sizeof(kFlutterMirrors[0]));
+
+// 拉取并解析 releases_windows.json（get_cached 带本地缓存；优先镜像，失败回退官方）
+bool load_index(json::Val& root, std::string& err, const char* mirror_storage) {
+    std::string body;
+    if (mirror_storage && mirror_storage[0]) {
+        std::string merr;
+        body = httpc::get_cached(std::string(mirror_storage) + "/releases/releases_windows.json",
+                                 merr);
+        if (body.empty()) logx::line("镜像索引不可用，回退官方源: " + merr);
+    }
+    if (body.empty()) body = httpc::get_cached(kIndexUrl, err);
     if (body.empty()) {
         err = "获取 Flutter 版本索引失败: " + err;
         logx::line(err);
@@ -56,13 +90,22 @@ bool newer_entry(const json::Val& e, const std::string& prev_date) {
 
 } // namespace
 
+FlutterProvider::FlutterProvider() {
+    // 恢复上次选择的镜像站（注册表 flutter\mirror；非法值回退默认社区镜像）
+    std::wstring v = platform::managed_get_value("flutter", L"mirror");
+    if (!v.empty()) {
+        int idx = _wtoi(v.c_str());
+        if (idx >= 0 && idx < kFlutterMirrorCount) mirror_ = idx;
+    }
+}
+
 std::string FlutterProvider::id() const { return "flutter"; }
 bool FlutterProvider::multi_version() const { return false; }
 std::string FlutterProvider::display() const { return "Flutter"; }
 
 bool FlutterProvider::list_versions(std::vector<VersionInfo>& out, std::string& err) {
     json::Val root;
-    if (!load_index(root, err)) return false;
+    if (!load_index(root, err, kFlutterMirrors[mirror_].storage)) return false;
     const json::Val* rel = releases_array(root);
     if (!rel) {
         err = "Flutter 版本索引缺少 releases 数组";
@@ -102,7 +145,7 @@ bool FlutterProvider::list_versions(std::vector<VersionInfo>& out, std::string& 
 
 bool FlutterProvider::resolve(const std::string& version_id, Artifact& out, std::string& err) {
     json::Val root;
-    if (!load_index(root, err)) return false;
+    if (!load_index(root, err, kFlutterMirrors[mirror_].storage)) return false;
     const json::Val* rel = releases_array(root);
     if (!rel) {
         err = "Flutter 版本索引缺少 releases 数组";
@@ -143,17 +186,22 @@ bool FlutterProvider::resolve(const std::string& version_id, Artifact& out, std:
 }
 
 std::vector<std::pair<std::string, std::wstring>> FlutterProvider::mirrors(const Artifact& a) const {
-    // a.url = <base>/<archive>；截取 flutter_infra_release/releases/ 之后的相对路径拼镜像
+    // a.url = <base>/<archive>；截取 flutter_infra_release/releases/ 之后的相对路径，
+    // 按各镜像站 storage base 重拼下载 URL；所选镜像置顶，其余按序跟随（失败自动回退）
     std::string rel = a.url;
     size_t p = rel.find(kArchiveMarker);
     if (p == std::string::npos)
         return {{"官方 storage.googleapis.com", su::utf8_to_wide(a.url)}};
     rel = rel.substr(p + std::strlen(kArchiveMarker));
     std::wstring wrel = su::utf8_to_wide(rel);
-    return {{"Flutter 国内镜像 flutter-io.cn",
-             L"https://storage.flutter-io.cn/flutter_infra_release/releases/" + wrel},
-            {"npmmirror 镜像", L"https://registry.npmmirror.com/-/binary/flutter/" + wrel},
-            {"官方 storage.googleapis.com", su::utf8_to_wide(a.url)}};
+    std::vector<std::pair<std::string, std::wstring>> all;
+    for (const FlutterMirror& m : kFlutterMirrors)
+        all.push_back({m.name, su::utf8_to_wide(m.storage) + L"/releases/" + wrel});
+    int sel = mirror_ >= 0 && mirror_ < kFlutterMirrorCount ? mirror_ : 0;
+    std::pair<std::string, std::wstring> pick = all[(size_t)sel];
+    all.erase(all.begin() + sel);
+    all.insert(all.begin(), std::move(pick));
+    return all;
 }
 
 bool FlutterProvider::verify(const Artifact& a, const fs::path& dest, std::string& err) {
@@ -172,6 +220,34 @@ std::vector<std::pair<std::string, std::string>> FlutterProvider::envs() const {
     return {{"FLUTTER_ROOT", ""}}; // 空值 = 安装根目录本身
 }
 std::string FlutterProvider::verify_exe() const { return "bin\\flutter.bat"; }
+
+// ---- 镜像站选择 ----
+std::vector<std::string> FlutterProvider::mirror_options() const {
+    std::vector<std::string> out;
+    for (const FlutterMirror& m : kFlutterMirrors) out.push_back(m.name);
+    return out;
+}
+
+int FlutterProvider::mirror_selected() const { return mirror_; }
+
+void FlutterProvider::set_mirror_selected(int idx) {
+    if (idx < 0 || idx >= kFlutterMirrorCount || idx == mirror_) return;
+    mirror_ = idx;
+    std::string err;
+    if (!platform::managed_set_value("flutter", L"mirror", std::to_wstring(idx), err))
+        logx::line("保存镜像选择失败: " + err);
+    logx::linef("下载镜像已切换: %s", kFlutterMirrors[idx].name);
+}
+
+std::vector<std::pair<std::string, std::string>> FlutterProvider::mirror_env_vars() const {
+    const FlutterMirror& m = kFlutterMirrors[mirror_];
+    if (!m.env_pub[0]) return {}; // 官方源：调用方应清除旧镜像变量
+    return {{"PUB_HOSTED_URL", m.env_pub}, {"FLUTTER_STORAGE_BASE_URL", m.env_storage}};
+}
+
+std::vector<std::string> FlutterProvider::env_cleanup_names() const {
+    return {"PUB_HOSTED_URL", "FLUTTER_STORAGE_BASE_URL"};
+}
 
 namespace {
 struct FlutterRegistrar {

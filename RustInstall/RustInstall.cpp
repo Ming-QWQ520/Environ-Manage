@@ -33,6 +33,7 @@
 #include "logger.hpp"
 #include "python.hpp"
 #include "providers/archive.hpp"
+#include "providers/checksum.hpp" // checksum::g_hash_progress（哈希计算进度回调）
 #include "providers/registry.hpp"
 #include "providers/node_tools.hpp"
 #include "platform/platform.hpp"
@@ -54,6 +55,7 @@ struct WorkHookGuard {
     ~WorkHookGuard() {
         archive::clear_hook();
         prov::clear_stage_hook();
+        checksum::clear_hash_progress();
     }
 };
 
@@ -91,6 +93,27 @@ inline auto make_extract_hook(Self self) {
     };
 }
 
+// 哈希计算进度 TUI 回调（校验阶段进度条：done/total 为已读/总字节，速率单位与下载一致）
+template <typename Self>
+inline auto make_hash_progress(Self self) {
+    return [self, h_draw = std::chrono::steady_clock::now(),
+            h_bytes = (uint64_t)0](uint64_t done, uint64_t total) mutable {
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - h_draw).count();
+        if (dt < 0.15 && !(total > 0 && done >= total)) return;
+        double bps = dt > 0 ? (double)(done - h_bytes) / dt : 0;
+        h_draw = now;
+        h_bytes = done;
+        {
+            std::lock_guard<std::mutex> lk(self->wmu);
+            self->w_done = done;
+            self->w_total = total;
+            self->w_bar = ui::progress_line(done, total, bps);
+        }
+        if (!self->exiting) self->screen.PostEvent(ftxui::Event::Custom);
+    };
+}
+
 // 安装管线阶段通知 → 步骤条推进（经 w_stage_step 映射；未映射的阶段忽略）
 template <typename Self>
 inline auto make_stage_hook(Self self) {
@@ -101,6 +124,10 @@ inline auto make_stage_hook(Self self) {
             std::lock_guard<std::mutex> lk(self->wmu);
             if (stage < (int)self->w_stage_step.size()) target = self->w_stage_step[stage];
             if (target >= 0) self->w_step = target;
+            if (stage == 1)
+                self->w_note = "正在计算哈希校验值…"; // 校验阶段（进度由哈希钩子驱动）
+            else if (stage == 2)
+                self->w_note.clear(); // 进入解压，由解压钩子接管进度条
         }
         if (target >= 0 && !self->exiting) self->screen.PostEvent(ftxui::Event::Custom);
     };
@@ -168,6 +195,11 @@ static void print_usage() {
         "                          pnpm: global-dir/global-bin-dir/state-dir/cache-dir\n"
         "                                → <根目录>\\global|bin|state|cache\n"
         "                          npm : prefix/cache → <根目录>\\npm-global|npm-cache\n"
+        "Flutter 下载镜像站（--sdk flutter，默认记忆上次选择；TUI 确认页 M 键切换）:\n"
+        "      --flutter-mirror <站> official（官方）/ tuna（清华）/ ustc（中科大）/\n"
+        "                          cn（Flutter 中国社区旧镜像，默认）；亦可填 0-3\n"
+        "                          安装后按所选镜像设置 PUB_HOSTED_URL /\n"
+        "                          FLUTTER_STORAGE_BASE_URL（选 official 时清除）\n"
         "\n"
         "示例:\n"
         "  RustInstall.exe                            TUI 交互模式\n"
@@ -179,7 +211,9 @@ static void print_usage() {
         "                                             Node.js + pnpm（存储规范化到指定目录）\n"
         "  RustInstall.exe --sdk jdk  -p D:\\Sdk --sdk-version 21      Temurin JDK 21\n"
         "  RustInstall.exe --sdk zig  -p D:\\Sdk                       Zig 最新稳定版\n"
-        "  RustInstall.exe --sdk git  -p D:\\Sdk                       Git For Windows 便携版\n");
+        "  RustInstall.exe --sdk git  -p D:\\Sdk                       Git For Windows 便携版\n"
+        "  RustInstall.exe --sdk flutter -p D:\\Sdk --flutter-mirror tuna\n"
+        "                                             Flutter SDK（清华 TUNA 镜像加速）\n");
 }
 
 struct Options {
@@ -216,6 +250,7 @@ struct Options {
     bool with_yarn = false;            // node 安装后经 Corepack 全局安装 yarn
     std::string corepack_mode;         // "" / enable（默认）| disable
     std::string pnpm_home;             // pnpm/npm 存储根目录（默认 <root>\pnpm-repository）
+    std::string flutter_mirror;        // Flutter 下载镜像站（official/tuna/ustc/cn 或 0-3）
     // 卸载（批处理模式）：--uninstall [版本|all]
     bool uninstall = false;
     std::string uninstall_target = "all";
@@ -235,6 +270,17 @@ static int parse_mirror_name(const std::string& s) {
     if (m == "ustc") return 1;
     if (m == "sjtu") return 2;
     return -2; // 无效
+}
+
+// Flutter 下载镜像站取值：名称或下标；-1 = 无法识别（0=官方 1=TUNA 2=USTC 3=社区旧镜像）
+static int parse_flutter_mirror(const std::string& s) {
+    std::string k = su::lower(s);
+    if (k == "official" || k == "官方") return 0;
+    if (k == "tuna" || k == "清华") return 1;
+    if (k == "ustc" || k == "中科大") return 2;
+    if (k == "cn" || k == "社区" || k == "flutter-io.cn") return 3;
+    if (k.size() == 1 && k[0] >= '0' && k[0] <= '3') return k[0] - '0';
+    return -1;
 }
 
 static Options parse_args(int argc, wchar_t** argv, bool& ok) {
@@ -350,6 +396,10 @@ static Options parse_args(int argc, wchar_t** argv, bool& ok) {
             wchar_t* v = need_value(i, a.c_str());
             if (!v) return o;
             o.pnpm_home = su::wide_to_utf8(v);
+        } else if (a == "--flutter-mirror") {
+            wchar_t* v = need_value(i, a.c_str());
+            if (!v) return o;
+            o.flutter_mirror = su::wide_to_utf8(v);
         } else if (a == "--uninstall") {
             o.uninstall = true;
             if (i + 1 < argc && argv[i + 1][0] != L'-')
@@ -615,12 +665,12 @@ static bool download_and_install(const Options& opts, const dist::Artifact& art,
     logx::linef("使用镜像: %s", dist::mirror_desc(used_mirror).c_str());
     out.ok = true;
 
-    // SHA-256 校验
+    // SHA-256 校验（大文件计算耗时，经全局回调驱动校验阶段进度条）
     prov::stage_notify(1);
     std::string expect = art.sha256;
     if (expect.empty()) expect = dist::fetch_sidecar_sha256(art.rel_path, used_mirror);
     if (!expect.empty()) {
-        std::string got = sha256::file_hex(dest.wstring());
+        std::string got = sha256::file_hex_progress(dest.wstring(), checksum::g_hash_progress);
         if (got.empty() || su::lower(got) != su::lower(expect)) {
             logx::linef("SHA-256 校验失败: 期望 %s 实际 %s", expect.c_str(), got.c_str());
             err = "SHA-256 校验失败\n  期望: " + expect + "\n  实际: " +
@@ -1244,6 +1294,16 @@ static int run_sdk_list(const Options& opts) {
 static int run_sdk_batch(const Options& opts) {
     auto provider = prov::Registry::instance().create(opts.sdk);
     if (!provider) return 1;
+    // Flutter：镜像站选择（--flutter-mirror 覆盖注册表记忆；不传则用上次选择/默认社区镜像）
+    if (provider->id() == "flutter" && !opts.flutter_mirror.empty()) {
+        int idx = parse_flutter_mirror(opts.flutter_mirror);
+        if (idx < 0) {
+            printf("%s--flutter-mirror 取值: official / tuna / ustc / cn（或 0-3）%s\n", ui::kRed,
+                   ui::kReset);
+            return 1;
+        }
+        provider->set_mirror_selected(idx);
+    }
     printf("正在获取 %s 版本列表…\n", provider->display().c_str());
     std::vector<prov::VersionInfo> vers;
     std::string err;
@@ -1305,7 +1365,8 @@ static int run_sdk_batch(const Options& opts) {
             ui::progress(done, total, bps);
         }
     };
-    // 解压可视化：下载进度行之后接解压进度行（总进度 + 速度），完成打印汇总行
+    // 解压可视化：下载进度行之后接解压进度行（总进度 + 速度），完成打印汇总行；
+    // 哈希验证阶段同步显示计算进度（SDK 压缩包可达 GB 级，SHA-256/512 计算需数秒）
     ::archive::set_hook([](int phase, uint64_t done, uint64_t total, double bps) {
         if (phase == 0) {
             ui::progress(done, total, bps);
@@ -1315,9 +1376,25 @@ static int run_sdk_batch(const Options& opts) {
                    su::human_size((uint64_t)bps).c_str());
         }
     });
+    {
+        double hbps = 0;
+        uint64_t hlast = 0;
+        auto hdraw = std::chrono::steady_clock::now();
+        checksum::set_hash_progress([&](uint64_t done, uint64_t total) {
+            auto now = std::chrono::steady_clock::now();
+            double dt = std::chrono::duration<double>(now - hdraw).count();
+            if (dt < 0.15 && !(total > 0 && done >= total)) return;
+            double inst = dt > 0 ? (double)(done - hlast) / dt : 0;
+            hbps = hbps == 0 ? inst : hbps * 0.7 + inst * 0.3;
+            hlast = done;
+            hdraw = now;
+            ui::progress(done, total, hbps);
+        });
+    }
     bool sdk_installed = prov::install_to_root(*provider, f, root, !opts.no_path, false, true,
                                                progress_fn, nullptr, verify_line, err);
     ::archive::clear_hook();
+    checksum::clear_hash_progress();
     if (!sdk_installed) {
         printf("\n");
         ui::progress_done(f.size, false);
@@ -1349,6 +1426,22 @@ static int run_sdk_batch(const Options& opts) {
                                            !opts.no_path, tools_line);
         if (!tools_line.empty())
             logx::line("工具链: " + tools_line);
+    }
+
+    // Flutter：按所选镜像站写入 PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL（官方源清除）
+    if (provider->id() == "flutter") {
+        for (const auto& ev : provider->mirror_env_vars()) {
+            std::string e2;
+            if (ev.second.empty()) {
+                platform::remove_user_env(ev.first, e2);
+                printf("  镜像环境变量: %s 已清除\n", ev.first.c_str());
+            } else if (platform::set_user_env(ev.first, su::utf8_to_wide(ev.second), e2)) {
+                printf("  镜像环境变量: %s=%s\n", ev.first.c_str(), ev.second.c_str());
+            } else {
+                printf("%s  镜像环境变量: %s 设置失败：%s%s\n", ui::kYellow, ev.first.c_str(),
+                       e2.c_str(), ui::kReset);
+            }
+        }
     }
 
     printf("\n%s================ 完成汇总 ================%s\n", ui::kCyan, ui::kReset);
@@ -1622,8 +1715,7 @@ static const char* step_hints(int st) {
         case S_PyFile: return "↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
         case S_PyConfirm: return "Enter 开始 · I 自动安装 · P 加PATH · K 留包 · Esc 返回";
         case S_SdkVersion: return "直接输入过滤 · ↑↓/W S 选择 · Enter 确认 · Esc 返回上一步";
-        case S_SdkConfirm:
-            return "Enter 开始 · P 加PATH · C Corepack · N pnpm · Y yarn · Esc 返回";
+        case S_SdkConfirm: return "Enter 开始 · M 镜像(Flutter) · P 加PATH · C Corepack · N pnpm · Y yarn · Esc 返回";
         case S_Installed:
             return "↑↓/W S 选择 · Enter 确认 · O 打开目录 · U 重新检测 · Esc 返回";
         case S_Hub:
@@ -3110,7 +3202,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             else if (cb_install) w_note = "下载后将自动安装/解压到目标目录";
         }
         w_kind = 2;
-        set_work_steps({"下载", "校验", "安装", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
+        set_work_steps({"下载", "哈希验证", "安装", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
         int mh = py::parse_mirror_name(s.opt.mirror_raw);
         auto self = shared_from_this();
         py::PyFile f = py_file;
@@ -3143,6 +3235,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             WorkHookGuard hook_guard;
             (void)hook_guard;
             ::archive::set_hook(make_extract_hook(self));
+            checksum::set_hash_progress(make_hash_progress(self)); // SHA-256 计算进度
             std::error_code ec;
             InstallOutcome out;
             fs::path dest = archive;
@@ -3162,7 +3255,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             {
                 std::lock_guard<std::mutex> lk(self->wmu);
                 self->w_step = 1;
-                self->w_note = "校验完整性…";
+                self->w_note = "正在计算哈希校验值…";
             }
             if (!self->exiting) self->screen.PostEvent(Event::Custom);
             if (!py::verify(f, dest, err)) {
@@ -3340,7 +3433,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         if (!sdk_provider) return;
         reset_work("正在下载 " + sdk_provider->display() + " " + sdk_file.version);
         w_kind = 3;
-        set_work_steps({"下载", "校验", "解压", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
+        set_work_steps({"下载", "哈希验证", "解压", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
         auto self = shared_from_this();
         prov::Artifact f = sdk_file;
         fs::path root = s.dir;
@@ -3364,6 +3457,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         };
         auto cancelled = [self] { return self->w_cancel.load(); };
         bool is_node = sdk_id == "node";
+        bool is_flutter = sdk_id == "flutter";
         bool want_pnpm = cb_pnpm && is_node;
         bool want_yarn = cb_yarn && is_node;
         bool corepack_on = cb_corepack && is_node;
@@ -3372,12 +3466,13 @@ struct AppState : std::enable_shared_from_this<AppState> {
             pnpm_base.empty()
                 ? root / L"pnpm-repository"
                 : resolve_dir(su::utf8_to_wide(pnpm_base));
-        w_thread = std::thread([self, f, root, add_path, prog, cancelled, is_node, want_pnpm,
-                                want_yarn, corepack_on, storage] {
+        w_thread = std::thread([self, f, root, add_path, prog, cancelled, is_node, is_flutter,
+                                want_pnpm, want_yarn, corepack_on, storage] {
             WorkHookGuard hook_guard;
             (void)hook_guard;
             ::archive::set_hook(make_extract_hook(self));
             prov::set_stage_hook(make_stage_hook(self));
+            checksum::set_hash_progress(make_hash_progress(self)); // SHA-256/SHA-512 计算进度
             std::string err, vline;
             if (!prov::install_to_root(*self->sdk_provider, f, root, add_path, false, true,
                                        prog, cancelled, vline, err)) {
@@ -3387,6 +3482,25 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 self->w_finished = true;
                 if (!self->exiting) self->screen.PostEvent(Event::Custom);
                 return;
+            }
+            // Flutter：按所选镜像站写入 PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL（官方源清除）
+            if (is_flutter) {
+                std::string env_note;
+                for (const auto& ev : self->sdk_provider->mirror_env_vars()) {
+                    std::string e2;
+                    if (ev.second.empty()) {
+                        platform::remove_user_env(ev.first, e2);
+                        env_note += (env_note.empty() ? "" : "、") + ev.first + "已清除";
+                    } else if (platform::set_user_env(ev.first, su::utf8_to_wide(ev.second), e2)) {
+                        env_note += (env_note.empty() ? "" : "、") + ev.first + "=" + ev.second;
+                    } else {
+                        env_note += (env_note.empty() ? "" : "、") + ev.first + "设置失败";
+                    }
+                }
+                if (!env_note.empty()) {
+                    logx::line("镜像环境变量: " + env_note);
+                    vline += (vline.empty() ? "" : "  /  ") + env_note;
+                }
             }
             // Node.js 工具链：npm/npx 随装自带（仅检测显示）→ Corepack 开关 →
             // pnpm/yarn（经 Corepack，全局）→ 存储位置规范化 → 检测报告
@@ -3495,7 +3609,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             if (s.repair) w_note = "修复模式：优先使用已下载的安装包";
         }
         w_kind = 0;
-        set_work_steps({"下载", "校验", "解压", "完成"}, {0, 1, 2, 2, 2, 3});
+        set_work_steps({"下载", "哈希验证", "解压", "完成"}, {0, 1, 2, 2, 2, 3});
 
         auto self = shared_from_this();
         auto prog = [self](uint64_t done, uint64_t total) {
@@ -3524,6 +3638,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             (void)hook_guard;
             ::archive::set_hook(make_extract_hook(self));
             prov::set_stage_hook(make_stage_hook(self));
+            checksum::set_hash_progress(make_hash_progress(self)); // SHA-256 计算进度
             InstallOutcome out;
             std::string err;
             int used = -1;
@@ -4185,7 +4300,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             text("大小     : " + (st->py_file.filesize > 0
                                       ? su::human_size(st->py_file.filesize)
                                       : std::string("下载时确定"))),
-            text("校验     : " + std::string(!st->py_file.sha256.empty()
+            text("哈希验证 : " + std::string(!st->py_file.sha256.empty()
                                                  ? "SHA-256"
                                                  : (!st->py_file.md5.empty() ? "MD5"
                                                                              : "下载完整性"))),
@@ -4283,7 +4398,11 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             text("目标     : " + (st->sdk_provider ? st->sdk_provider->display() : st->sdk_id)),
             text("版本     : " + st->sdk_file.version),
             text("文件     : " + st->sdk_file.filename),
-            text("校验     : " + std::string(!st->sdk_file.sha256.empty() ? "SHA-256" : "下载完整性")),
+            text("哈希验证 : " +
+                 std::string(!st->sdk_file.sha256.empty()
+                                 ? "SHA-256"
+                                 : (!st->sdk_file.sha512.empty() ? "SHA-512"
+                                                                 : "下载完整性"))),
             text(multi ? "模式     : 多版本目录 <安装目录>\\<版本> + current junction"
                        : "模式     : 单版本平铺目录（更新覆盖，卸载删除整个目录）"),
             text("根目录   : " + w(st->s.dir)),
@@ -4311,6 +4430,20 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
             rows.push_back(text("   pnpm global-dir/global-bin-dir/state-dir/cache-dir 与"
                                 " npm prefix/cache 规范至此目录") |
                             dim);
+        }
+        if (st->sdk_id == "flutter" && st->sdk_provider) {
+            // Flutter 下载镜像站：官方 / 清华 TUNA / 中科大 USTC / 中国社区旧镜像（M 键切换）
+            std::vector<std::string> opts = st->sdk_provider->mirror_options();
+            int sel = st->sdk_provider->mirror_selected();
+            if (!opts.empty() && sel >= 0 && sel < (int)opts.size()) {
+                rows.push_back(separator());
+                rows.push_back(text(" 下载镜像 : " + opts[(size_t)sel] + "   （M 切换）") |
+                               color(Color::Cyan));
+                rows.push_back(text("   安装后设置 PUB_HOSTED_URL / FLUTTER_STORAGE_BASE_URL 镜像环境变量"
+                                    "（官方源自动清除）") |
+                                dim);
+                rows.push_back(text("   所选镜像下载失败时自动回退其余镜像站") | dim);
+            }
         }
         rows.push_back(text(""));
         rows.push_back(st->sdk_screen_err.empty() ? text("")
@@ -4783,6 +4916,15 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
                     if (st->cb_yarn) st->cb_corepack = true;
                     return true;
                 }
+            }
+            if (st->step == S_SdkConfirm && (ch == "m" || ch == "M") &&
+                st->sdk_id == "flutter" && st->sdk_provider) {
+                // 循环切换下载镜像站（官方 → TUNA → USTC → 社区旧镜像），选择持久化
+                std::vector<std::string> opts = st->sdk_provider->mirror_options();
+                if (!opts.empty())
+                    st->sdk_provider->set_mirror_selected(
+                        (st->sdk_provider->mirror_selected() + 1) % (int)opts.size());
+                return true;
             }
             if (st->step == S_Confirm && (ch == "m" || ch == "M")) {
                 st->s.mirror = st->s.mirror >= 2 ? -1 : st->s.mirror + 1;

@@ -48,6 +48,7 @@ bool GitProvider::ensure_list(std::string& err) {
                     n.substr(7, n.size() - 7 - (suffix.size() + 5)); // MinGit-<ver>-<suffix>.zip
                 if (ver.empty() || url_of_.count(ver)) continue;
                 url_of_[ver] = a.url;
+                digest_of_[ver] = a.digest;
             }
             if (url_of_.size() >= 40) break; // 每平台取最近版本即可
         }
@@ -88,6 +89,7 @@ bool GitProvider::resolve(const std::string& version_id, Artifact& out, std::str
     out.version_id = version_id;
     out.version = version_id;
     out.url = it->second;
+    out.sha256 = digest_of_[version_id]; // GitHub API digest（可用时供 artifact_ok 硬校验）
     size_t slash = out.url.find_last_of('/');
     out.filename = slash == std::string::npos ? out.url : out.url.substr(slash + 1);
     return true;
@@ -98,7 +100,8 @@ std::vector<std::pair<std::string, std::wstring>> GitProvider::mirrors(const Art
 }
 
 bool GitProvider::verify(const Artifact& a, const fs::path& dest, std::string& err) {
-    // 尝试官方同名 .sha256 资产；不可用时退回大小比对
+    // 优先官方同名 .sha256 侧车；其次 GitHub API digest（artifact_ok 内 SHA-256）；
+    // 均不可用时退回大小比对
     std::string sums = httpc::get_cached(a.url + ".sha256", err);
     if (!sums.empty()) {
         // 文件内容形如 "<hash>  <filename>" 或纯 hash

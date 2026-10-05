@@ -77,6 +77,7 @@ bool RubyProvider::ensure_list(std::string& err) {
             if (id.empty() || url_of_.count(id)) continue;
             url_of_[id] = a.url;
             size_of_[id] = a.size;
+            digest_of_[id] = a.digest;
         }
     }
     if (url_of_.empty()) {
@@ -118,6 +119,7 @@ bool RubyProvider::resolve(const std::string& version_id, Artifact& out, std::st
     out.version = version_id;
     out.url = it->second;
     out.size = size_of_[version_id];
+    out.sha256 = digest_of_[version_id]; // GitHub API digest（可用时 SHA-256 硬校验）
     size_t slash = out.url.find_last_of('/');
     out.filename = slash == std::string::npos ? out.url : out.url.substr(slash + 1);
     return true;
@@ -128,7 +130,7 @@ std::vector<std::pair<std::string, std::wstring>> RubyProvider::mirrors(const Ar
 }
 
 bool RubyProvider::verify(const Artifact& a, const fs::path& dest, std::string& err) {
-    // Release 资产无独立校验和文件 —— 大小比对（下载字节数已与 Content-Length 核对）
+    // GitHub API digest 可用时为 SHA-256 硬校验；否则退回大小比对（下载字节数已核对）
     return checksum::artifact_ok(a, dest, err);
 }
 

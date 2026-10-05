@@ -388,6 +388,9 @@
     <ClInclude Include="sha256.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="sha512.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="json.hpp">
       <Filter>头文件</Filter>
     </ClInclude>

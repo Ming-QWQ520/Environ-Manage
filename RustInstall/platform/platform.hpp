@@ -420,6 +420,43 @@ inline bool managed_set_last_root(const std::string& lang, const fs::path& root)
     return rc == ERROR_SUCCESS;
 }
 
+// ---- 通用用户偏好（HKCU\Software\EnvironManage\<lang>\<name>，REG_SZ） ----
+// 用于镜像站选择等小配置的持久化（如 flutter\mirror = 镜像下标）
+inline bool managed_set_value(const std::string& lang, const wchar_t* name,
+                              const std::wstring& value, std::string& err) {
+    HKEY key = nullptr;
+    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
+                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+    if (rc != ERROR_SUCCESS) {
+        err = "打开注册表 Software\\EnvironManage 失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    rc = RegSetValueExW(key, name, 0, REG_SZ, (const BYTE*)value.c_str(),
+                        (DWORD)((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS) {
+        err = "写入注册表值失败（错误码 " + std::to_string(rc) + "）";
+        return false;
+    }
+    return true;
+}
+
+inline std::wstring managed_get_value(const std::string& lang, const wchar_t* name) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
+                      &key) != ERROR_SUCCESS)
+        return {};
+    wchar_t buf[MAX_PATH * 2] = {};
+    DWORD size = sizeof(buf) - sizeof(wchar_t), type = 0;
+    std::wstring out;
+    if (RegQueryValueExW(key, name, nullptr, &type, (BYTE*)buf, &size) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ))
+        out.assign(buf, size / 2);
+    while (!out.empty() && out.back() == L'\0') out.pop_back();
+    RegCloseKey(key);
+    return out;
+}
+
 inline std::wstring managed_get_last_root(const std::string& lang) {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
