@@ -167,6 +167,7 @@
     <ClInclude Include="providers/php/php_provider.hpp" />
     <ClInclude Include="providers/ruby/ruby_provider.hpp" />
     <ClInclude Include="providers/git/git_provider.hpp" />
+    <ClInclude Include="providers/flutter/flutter_provider.hpp" />
     <ClInclude Include="toml_lite.hpp" />
     <ClInclude Include="http.hpp" />
     <ClInclude Include="console_ui.hpp" />
@@ -184,6 +185,7 @@
     <ClCompile Include="providers/php/php_provider.cpp" />
     <ClCompile Include="providers/ruby/ruby_provider.cpp" />
     <ClCompile Include="providers/git/git_provider.cpp" />
+    <ClCompile Include="providers/flutter/flutter_provider.cpp" />
     <ClCompile Include="third_party\ftxui\src\ftxui\component\animation.cpp">
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
     </ClCompile>

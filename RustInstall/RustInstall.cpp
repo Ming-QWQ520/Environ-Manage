@@ -86,11 +86,11 @@ static void print_usage() {
         "      --py-token <Token>  可选：python.org API Token（元数据增强，匿名 API 已限流）\n"
         "\n"
         "SDK 管理:\n"
-        "      --sdk <id>          node / jdk / go / dotnet / zig / php / ruby / git\n"
+        "      --sdk <id>          node / jdk / go / dotnet / zig / php / ruby / git / flutter\n"
         "      --sdk-list          仅列出该 SDK 的版本后退出\n"
         "      --sdk-version <版本> 指定版本（默认最新；jdk 为大版本，dotnet 为通道）\n"
         "      布局: node/jdk 多版本 <目录>\\<版本> + current junction；\n"
-        "            go/dotnet/zig/php/ruby/git 单版本平铺（直接安装于 <目录>）\n"
+        "            go/dotnet/zig/php/ruby/git/flutter 单版本平铺（直接安装于 <目录>）\n"
         "\n"
         "卸载（批处理模式）:\n"
         "      --uninstall [版本|all]\n"
@@ -261,7 +261,7 @@ static Options parse_args(int argc, wchar_t** argv, bool& ok) {
             if (!v) return o;
             o.sdk = su::lower(su::wide_to_utf8(v));
             if (!prov::Registry::instance().create(o.sdk)) {
-                printf("--sdk 无效: %s（可选 node/jdk/go/dotnet/zig/php/ruby/git）\n",
+                printf("--sdk 无效: %s（可选 node/jdk/go/dotnet/zig/php/ruby/git/flutter）\n",
                        o.sdk.c_str());
                 ok = false;
                 return o;
@@ -1653,8 +1653,9 @@ inline std::string extract_ver_token(const std::string& lang, const std::string&
             return line.substr(q1 + 1, q2 - q1 - 1);
         return line;
     }
-    if (lang == "php" || lang == "ruby") {
-        // "PHP 8.3.14 (cli)…" / "ruby 3.3.5 (2024-…)" → 语言名后的第一个 token
+    if (lang == "php" || lang == "ruby" || lang == "flutter") {
+        // "PHP 8.3.14 (cli)…" / "ruby 3.3.5 (2024-…)" / "Flutter 3.24.3 • …"
+        // → 语言名后的第一个 token
         size_t p = line.find(' ');
         while (p != std::string::npos && p + 1 < line.size()) {
             size_t b = p + 1, e2 = b;
@@ -1764,11 +1765,13 @@ inline std::vector<DetectedInst> detect_lang_installs(const std::string& id,
         const wchar_t* envname = id == "jdk"     ? L"JAVA_HOME"
                                  : id == "go"    ? L"GOROOT"
                                  : id == "dotnet" ? L"DOTNET_ROOT"
+                                 : id == "flutter" ? L"FLUTTER_ROOT"
                                                   : nullptr;
         if (envname && GetEnvironmentVariableW(envname, envbuf, MAX_PATH * 2)) {
             fs::path home(envbuf);
             exe = id == "jdk"  ? home / L"bin" / L"java.exe"
                   : id == "go" ? home / L"bin" / L"go.exe"
+                  : id == "flutter" ? home / L"bin" / L"flutter.bat"
                                : home / L"dotnet.exe";
         }
         const wchar_t* exe_name = id == "jdk"     ? L"java.exe"
@@ -1778,9 +1781,10 @@ inline std::vector<DetectedInst> detect_lang_installs(const std::string& id,
                                   : id == "php"   ? L"php.exe"
                                   : id == "ruby"  ? L"ruby.exe"
                                   : id == "git"   ? L"git.exe"
+                                  : id == "flutter" ? L"flutter.bat"
                                                   : L"node.exe";
         // exe 目录 → 安装根目录的上溯层数（bin/、cmd/ 内的可执行文件上溯 2 层）
-        int depth = (id == "jdk" || id == "ruby" || id == "git") ? 2 : 1;
+        int depth = (id == "jdk" || id == "ruby" || id == "git" || id == "flutter") ? 2 : 1;
         if (!fs::is_regular_file(exe, ec)) exe = platform::find_in_path(exe_name);
         if (!exe.empty() && fs::is_regular_file(exe, ec)) {
             fs::path home = exe.parent_path();
@@ -2275,7 +2279,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
                                       "Node.js",      "JDK (Temurin)",
                                       "Go",           ".NET",
                                       "Zig",          "PHP",
-                                      "Ruby",         "Git For Windows"};
+                                      "Ruby",         "Git For Windows",
+                                      "Flutter"};
     int ch_sel = 0;
 
     // SDK 管理（Node/JDK/Go/.NET）
@@ -2326,7 +2331,8 @@ struct AppState : std::enable_shared_from_this<AppState> {
                           {"node", "Node.js"},    {"jdk", "JDK (Temurin)"},
                           {"go", "Go"},           {"dotnet", ".NET"},
                           {"zig", "Zig"},         {"php", "PHP"},
-                          {"ruby", "Ruby"},       {"git", "Git For Windows"}};
+                          {"ruby", "Ruby"},       {"git", "Git For Windows"},
+                          {"flutter", "Flutter"}};
             std::vector<HubLang> out;
             for (const auto& L : kLangs) {
                 HubLang hl;
@@ -3899,7 +3905,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
     // ---- 管理目标（首页） ----
     Component ch_menu_c = make_menu(&st->ch_items, &st->ch_sel, [st] {
         static const char* kSdkIds[] = {"", "", "node", "jdk", "go", "dotnet",
-                                        "zig", "php", "ruby", "git"};
+                                        "zig", "php", "ruby", "git", "flutter"};
         if (st->ch_sel == 0) {
             logx::line("用户选择: 管理 Rust");
             st->go((st->s.rust_ok && !st->s.ver_set) ? S_UpdateCheck : st->first_unset());

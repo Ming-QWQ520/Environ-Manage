@@ -55,6 +55,9 @@
     <ClCompile Include="providers/git/git_provider.cpp">
       <Filter>providers\git</Filter>
     </ClCompile>
+    <ClCompile Include="providers/flutter/flutter_provider.cpp">
+      <Filter>providers\flutter</Filter>
+    </ClCompile>
     <ClInclude Include="providers/provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
@@ -103,6 +106,9 @@
     <ClInclude Include="providers/git/git_provider.hpp">
       <Filter>providers\headers</Filter>
     </ClInclude>
+    <ClInclude Include="providers/flutter/flutter_provider.hpp">
+      <Filter>providers\headers</Filter>
+    </ClInclude>
     <Filter Include="providers">
       <UniqueIdentifier>{a1000001-0000-4000-8000-000000000001}</UniqueIdentifier>
     </Filter>
@@ -129,6 +135,9 @@
     </Filter>
     <Filter Include="providers\git">
       <UniqueIdentifier>{a1000001-0000-4000-8000-00000000000a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="providers\flutter">
+      <UniqueIdentifier>{a1000001-0000-4000-8000-00000000000b}</UniqueIdentifier>
     </Filter>
     <Filter Include="providers\headers">
       <UniqueIdentifier>{a1000001-0000-4000-8000-000000000006}</UniqueIdentifier>

@@ -3,12 +3,12 @@
 > By: Ming-QWQ520(明) · 开源协议: [AGPL-3.0](LICENSE)
 
 一个纯命令行的 **Windows 开发环境下载管理工具**（C++20，TUI 基于 [FTXUI](https://github.com/ArthurSonzogni/FTXUI)（已内置于 `RustInstall/third_party/ftxui`，MIT），网络层为 WinHTTP，**无其他第三方依赖**）。
-支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET / Zig / PHP / Ruby (RubyInstaller) / Git For Windows** 十种环境的完整下载、校验、安装与全生命周期管理。
+支持 **Rust / Python / Node.js / JDK (Temurin) / Go / .NET / Zig / PHP / Ruby (RubyInstaller) / Git For Windows / Flutter** 十一种环境的完整下载、校验、安装与全生命周期管理。
 
 - **双模式**：无参数启动即为全屏 TUI 交互界面；带参数则为非交互批处理（脚本/CI 可用）。
 - **分语言布局 + 全生命周期管理**：**JDK / Python / Node.js 多版本共存**，安装到
   `<安装目录>\<版本>`（如 `D:\Python\3.12.6\python.exe`），`<安装目录>\current` junction
-  指向当前版本；**Go / .NET / Zig / PHP / Ruby / Git For Windows 单版本平铺**，直接安装于
+  指向当前版本；**Go / .NET / Zig / PHP / Ruby / Git For Windows / Flutter 单版本平铺**，直接安装于
   `<安装目录>`（如 `D:\Git\cmd\git.exe`），更新即覆盖、卸载删整个目录。
   所有语言均自动检测已装版本与位置，支持安装/更新/卸载。
 - **国内网络友好**：GitHub API 经 gh-proxy 加速，安装包走中科大 / 上交 / 华为云 / npmmirror / 阿里云等镜像，失败自动切换，全程支持断点续传。
@@ -30,6 +30,7 @@
 | **PHP** | `windows.php.net` 官方目录解析（releases + archives） | 官方 releases → archives 回退 | `sha256.sum` → 大小比对 |
 | **Ruby** | `oneclick/rubyinstaller2` GitHub Releases（.7z） | gh-proxy 加速 → 直连 | 大小比对（官方无独立校验和） |
 | **Git** | `git-for-windows/git` GitHub Releases（Git For Windows 便携版 MinGit 包） | gh-proxy 加速 → 直连 | 官方 `.sha256` → 大小比对 |
+| **Flutter** | Flutter 官方 `releases_windows.json` 发布索引（仅 stable 通道） | flutter-io.cn / npmmirror / 官方 | 索引自带 SHA-256 |
 
 ---
 
@@ -76,9 +77,9 @@ RustInstall.exe
 
 全屏 TUI：顶部为页眉（标题 / 作者 / 布局与当前步骤），中部为当前步骤面板，
 底部为键位提示栏。启动后先选择管理目标（Rust / Python / Node.js / JDK / Go / .NET /
-Zig / PHP / Ruby / Git），首页自动后台检测全部已装语言并显示摘要（**无安装时不显示**），
+Zig / PHP / Ruby / Git / Flutter），首页自动后台检测全部已装语言并显示摘要（**无安装时不显示**），
 随后自动检测本机已装版本并显示安装位置（Python / Node.js / JDK / Go / .NET /
-Zig / PHP / Ruby / Git 走"已安装检测"屏，可执行安装/更新/卸载/切换当前版本/打开目录；Rust 走"检查更新"屏），再按
+Zig / PHP / Ruby / Git / Flutter 走"已安装检测"屏，可执行安装/更新/卸载/切换当前版本/打开目录；Rust 走"检查更新"屏），再按
 "安装路径 → 选择版本 → 确认 → 下载安装 → 完成结果"逐步进行。
 
 > **Ctrl+C 复制**：TUI 中选中文字后按 Ctrl+C 由终端完成复制（QuickEdit），未选中时
@@ -194,6 +195,9 @@ RustInstall.exe --sdk ruby -p D:\Sdk
 
 :: 安装 Git For Windows 便携版（MinGit 官方精简包解压即用）
 RustInstall.exe --sdk git -p D:\Sdk
+
+:: 安装 Flutter 最新稳定版（flutter-io.cn / npmmirror 镜像自动切换，Dart SDK 随装自带）
+RustInstall.exe --sdk flutter -p D:\Flutter
 ```
 
 ---
@@ -252,9 +256,9 @@ RustInstall.exe --sdk git -p D:\Sdk
 
 ---
 
-## Node.js / JDK / Go / .NET / Zig / PHP / Ruby / Git For Windows 管理
+## Node.js / JDK / Go / .NET / Zig / PHP / Ruby / Git For Windows / Flutter 管理
 
-TUI 选择目标或 `--sdk <id>` 进入，八个 SDK 走统一的 Provider 接口
+TUI 选择目标或 `--sdk <id>` 进入，九个 SDK 走统一的 Provider 接口
 （`providers/provider.hpp`，UI 只依赖 `provider.hpp` + `registry.hpp`，各 Provider 通过
 静态注册器自注册到工厂，按名字创建）：
 
@@ -268,13 +272,14 @@ TUI 选择目标或 `--sdk <id>` 进入，八个 SDK 走统一的 Provider 接�
 | PHP | `windows.php.net` 目录解析（`php-*-[nts-]Win32-*-<arch>.zip`） | **TS**（线程安全）/ **NTS** | 单版本平铺 | 直接安装于根目录（扁平结构） |
 | Ruby | `oneclick/rubyinstaller2` Releases 的 `rubyinstaller-*-{x64,x86}.7z` | **RubyInstaller** | 单版本平铺 | 直接安装于根目录（7z 解压，经自动下载的 7zr.exe） |
 | Git For Windows | `git-for-windows/git` Releases 的 `MinGit-*-*.zip`（排除 busybox） | **MinGit** | 单版本平铺 | 直接安装于根目录（扁平结构），`cmd\git.exe` |
+| Flutter | Flutter 官方 `releases_windows.json`（仅 stable 通道，同版本重复发布取最新） | **Stable** | 单版本平铺 | 直接安装于根目录（顶层 `flutter/` 自动合并），`bin\flutter.bat`，`FLUTTER_ROOT` 指向根目录 |
 
 - **布局分派**：`node` / `jdk` 多版本（`<安装目录>\<版本>` + `<安装目录>\current` junction，
   与 Python 一致）；其余语言单版本平铺（直接安装于 `<安装目录>`，无版本子目录与 junction，
   更新为覆盖安装，卸载删除整个安装目录）。历史版本安装的旧多版本目录仍可正常检测与卸载
 - **PATH**：多版本加入 `<安装目录>\current[\<bin>]`；平铺加入 `<安装目录>[\<bin>]`；
   JDK 另设 `JAVA_HOME`、Go 设 `GOROOT`、.NET 设 `DOTNET_ROOT` 与
-  `DOTNET_CLI_TELEMETRY_OPTOUT=1`；Zig / PHP / Ruby / Git 仅写 PATH
+  `DOTNET_CLI_TELEMETRY_OPTOUT=1`、Flutter 设 `FLUTTER_ROOT`；Zig / PHP / Ruby / Git 仅写 PATH
 - **检测 / 更新 / 卸载 / 切换 / 打开目录**：进入目标环境后自动扫描已装版本与位置（本工具受管记录 +
   注册表 / 环境变量 / PATH 探测外部安装），可一键更新到最新（多版本新版本共存并切换 current，
   平铺覆盖安装）、卸载（多版本按版本删除 + 自动重指 current，平铺删除整个安装目录，
@@ -381,7 +386,7 @@ SDK 侧的统一安装流程（`providers/provider.cpp` 的 `install_to_root`）
 | `RustInstall/providers/checksum.hpp` · `archive.hpp` · `http_client.hpp` | SDK 侧校验 / 解压 / 下载公共件 |
 | `RustInstall/providers/node_tools.hpp` | Node 工具链：npm/npx 检测显示、Corepack 启/禁开关、pnpm/yarn 经 Corepack 安装与存储位置规范化（含回读校验） |
 | `RustInstall/providers/gh_releases.hpp` | 通用 GitHub Releases 查询（assets 直链/大小 + gh-proxy 线路记忆），供 Ruby / Git 使用 |
-| `RustInstall/providers/{node,jdk,go,dotnet,zig,php,ruby,git}/*` | 八个 SDK 的 Provider 实现（版本枚举、工件解析、镜像、校验、解压布局） |
+| `RustInstall/providers/{node,jdk,go,dotnet,zig,php,ruby,git,flutter}/*` | 九个 SDK 的 Provider 实现（版本枚举、工件解析、镜像、校验、解压布局） |
 | `RustInstall/RustInstall.vcxproj` · `.filters` | MSVC 工程与筛选器（直接编译内置 FTXUI） |
 | `RustInstall/third_party/ftxui` | FTXUI v7.0.3 源码（MIT，随项目一起编译） |
 | `RustInstall.slnx` | Visual Studio 解决方案 |
