@@ -3,10 +3,17 @@
 
 #include <windows.h>
 
+#include <cstdint>
+#include <cstdio>
+#include <cwchar>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "../json.hpp"
 #include "logger.hpp"
 #include "strutil.hpp"
 
@@ -307,22 +314,238 @@ inline bool remove_user_env(const std::string& name, std::string& err) {
     return true;
 }
 
-// ------------------------------------------------------- 受管安装记录（HKCU\Software\EnvironManage）
+// ------------------------------------------------------- 受管安装记录（JSON 文件，不写注册表）
 //
-// 每种语言一个子键：<lang>（rust/python/node/jdk/go/dotnet）
-//   roots     REG_MULTI_SZ  受本工具管理的安装根目录（统一布局 <root>\<版本> + <root>\current）
-//   last_root REG_SZ        该语言最近一次使用的根目录（路径屏预填）
+// 每种语言一个 JSON 文件，创建于应用所在目录（项目文件夹根目录，即 exe 同级）：
+//   Environ-Manage-<语言名称>.json（如 Environ-Manage-Flutter.json）
+//
+// 文件结构：
+// {
+//   "app":        "Environ-Manage",
+//   "id":         "flutter",             // 语言 id（与 Provider 一致）
+//   "language":   "Flutter",             // 语言显示名（与文件名一致）
+//   "last_root":  "D:\\DevEnv",          // 该语言最近一次使用的根目录（路径屏预填）
+//   "roots":      ["D:\\DevEnv"],        // 受本工具管理的安装根目录
+//   "values":     { "mirror": "1" },     // 语言级偏好（如 Flutter 下载镜像下标）
+//   "updated_at": "2026-10-05 14:30:22"
+// }
+//
+// 旧版本写在 HKCU\Software\EnvironManage 的记录会在首次读取时自动迁移到 JSON
+// （迁移只读注册表），成功后清理对应旧键；此后语言管理不再写入注册表。
 
 inline std::wstring managed_key(const std::string& lang) {
     return L"Software\\EnvironManage\\" + su::utf8_to_wide(lang);
 }
 
-inline std::vector<std::wstring> managed_get_roots(const std::string& lang) {
-    std::vector<std::wstring> out;
+// 应用所在目录（项目文件夹根目录）：记录文件 / 缓存 / 日志的基准目录
+inline fs::path app_dir() {
+    wchar_t exe[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
+    if (!exe[0]) return fs::path(L".");
+    return fs::path(exe).parent_path();
+}
+
+// 语言 id → 显示名（与 TUI 首页 kLangs 一致，用作记录文件名）
+inline const char* managed_display_name(const std::string& lang) {
+    static const struct { const char* id; const char* name; } kNames[] = {
+        {"rust", "Rust"},         {"python", "Python"},
+        {"node", "Node.js"},      {"jdk", "JDK (Temurin)"},
+        {"go", "Go"},             {"dotnet", ".NET"},
+        {"zig", "Zig"},           {"php", "PHP"},
+        {"ruby", "Ruby"},         {"git", "Git For Windows"},
+        {"flutter", "Flutter"},
+    };
+    for (const auto& e : kNames)
+        if (lang == e.id) return e.name;
+    return lang.c_str(); // 未知语言退回 id（仅在本次调用内有效）
+}
+
+// 记录文件名组件安全化（防御显示名引入 Windows 文件名非法字符）
+inline std::wstring managed_filename_component(const std::string& utf8) {
+    std::wstring w = su::utf8_to_wide(utf8);
+    for (wchar_t& c : w)
+        if (c < 0x20 || std::wcschr(L"<>:\"/\\|?*", c)) c = L'-';
+    return w;
+}
+
+inline fs::path managed_json_path(const std::string& lang) {
+    std::wstring name =
+        L"Environ-Manage-" + managed_filename_component(managed_display_name(lang)) + L".json";
+    return app_dir() / name;
+}
+
+struct ManagedRecord {
+    std::string id;         // 语言 id
+    std::string language;   // 语言显示名
+    std::wstring last_root; // 最近一次使用的根目录
+    std::vector<std::wstring> roots;                          // 受管根目录
+    std::vector<std::pair<std::string, std::wstring>> values; // 语言级偏好（键 → 值）
+};
+
+// JSON 字符串转义（记录文件写出用）
+inline std::string json_escape_str(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    char buf[8];
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    snprintf(buf, sizeof(buf), "\\u%04x", (unsigned)c);
+                    out += buf;
+                } else {
+                    out += (char)c;
+                }
+        }
+    }
+    return out;
+}
+
+inline std::string managed_now_stamp() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char ts[48];
+    snprintf(ts, sizeof(ts), "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay,
+             st.wHour, st.wMinute, st.wSecond);
+    return ts;
+}
+
+inline std::string managed_to_json(const ManagedRecord& r) {
+    std::string o;
+    o += "{\n";
+    o += "  \"app\": \"Environ-Manage\",\n";
+    o += "  \"id\": \"" + json_escape_str(r.id) + "\",\n";
+    o += "  \"language\": \"" + json_escape_str(r.language) + "\",\n";
+    o += "  \"last_root\": \"" + json_escape_str(su::wide_to_utf8(r.last_root)) + "\",\n";
+    o += "  \"roots\": [";
+    for (size_t i = 0; i < r.roots.size(); ++i) {
+        if (i) o += ", ";
+        o += "\"" + json_escape_str(su::wide_to_utf8(r.roots[i])) + "\"";
+    }
+    o += "],\n";
+    o += "  \"values\": {";
+    for (size_t i = 0; i < r.values.size(); ++i) {
+        if (i) o += ", ";
+        o += "\"" + json_escape_str(r.values[i].first) +
+             "\": \"" + json_escape_str(su::wide_to_utf8(r.values[i].second)) + "\"";
+    }
+    o += "},\n";
+    o += "  \"updated_at\": \"" + managed_now_stamp() + "\"\n";
+    o += "}\n";
+    return o;
+}
+
+inline bool managed_from_json(const std::string& text, ManagedRecord& r, std::string& err) {
+    json::Parser p(text);
+    json::Val v;
+    if (!p.parse(v, err)) return false;
+    if (v.t != json::Val::Obj) {
+        err = "记录文件根不是 JSON 对象";
+        return false;
+    }
+    ManagedRecord t;
+    if (const json::Val* x = v.get("id")) t.id = x->str_or();
+    if (const json::Val* x = v.get("language")) t.language = x->str_or();
+    if (const json::Val* x = v.get("last_root")) t.last_root = su::utf8_to_wide(x->str_or());
+    if (const json::Val* x = v.get("roots")) {
+        if (x->t == json::Val::Arr)
+            for (const json::Val& e : x->arr)
+                if (e.t == json::Val::Str && !e.s.empty())
+                    t.roots.push_back(su::utf8_to_wide(e.s));
+    }
+    if (const json::Val* x = v.get("values")) {
+        if (x->t == json::Val::Obj)
+            for (const auto& kv : x->kv)
+                if (kv.second.t == json::Val::Str)
+                    t.values.emplace_back(kv.first, su::utf8_to_wide(kv.second.s));
+    }
+    r = std::move(t);
+    return true;
+}
+
+inline bool managed_read_file(const fs::path& p, std::string& out) {
+    std::error_code ec;
+    uintmax_t sz = fs::file_size(p, ec);
+    if (ec) return false;
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    out.resize((size_t)sz);
+    if (sz > 0) f.read(out.data(), (std::streamsize)sz);
+    out.resize((size_t)f.gcount());
+    return true;
+}
+
+// 原子写出：先写 .tmp 再替换，避免检测线程读到半截文件
+inline bool managed_write_file(const fs::path& p, const std::string& data, std::string& err) {
+    std::error_code ec;
+    if (!p.parent_path().empty()) fs::create_directories(p.parent_path(), ec);
+    fs::path tmp = p;
+    tmp += L".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            err = "无法创建记录文件 " + su::wide_to_utf8(tmp.wstring());
+            return false;
+        }
+        f.write(data.data(), (std::streamsize)data.size());
+        f.flush();
+        if (!f) {
+            err = "写入记录文件失败 " + su::wide_to_utf8(tmp.wstring());
+            f.close();
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    ec.clear();
+    fs::rename(tmp, p, ec);
+    if (ec) {
+        std::error_code ec2;
+        fs::remove(p, ec2); // 目标已存在时先移除再替换
+        fs::rename(tmp, p, ec);
+        if (ec) {
+            err = "替换记录文件失败 " + su::wide_to_utf8(p.wstring()) + "：" + ec.message();
+            return false;
+        }
+    }
+    return true;
+}
+
+inline std::mutex& managed_mu() {
+    static std::mutex m;
+    return m;
+}
+
+// 保存记录（需持锁）：全空记录直接删除文件；调用前补齐 id / language
+inline bool managed_save_locked(const std::string& lang, ManagedRecord& r, std::string& err) {
+    if (r.id.empty()) r.id = lang;
+    if (r.language.empty()) r.language = managed_display_name(lang);
+    if (r.roots.empty() && r.last_root.empty() && r.values.empty()) {
+        std::error_code ec;
+        fs::remove(managed_json_path(lang), ec);
+        return true;
+    }
+    return managed_write_file(managed_json_path(lang), managed_to_json(r), err);
+}
+
+// 旧注册表迁移（需持锁，只读注册表）：HKCU\Software\EnvironManage\<lang> → JSON
+// 迁移成功后清理旧键（语言管理自此不再使用注册表）；写 JSON 失败则保留注册表数据下次重试
+inline bool managed_migrate_locked(const std::string& lang, ManagedRecord& r) {
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
-                      &key) != ERROR_SUCCESS)
-        return out;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE, &key) !=
+        ERROR_SUCCESS)
+        return false; // 无旧记录
+
+    ManagedRecord old;
+    old.id = lang;
+    old.language = managed_display_name(lang);
+
     DWORD type = 0, size = 0;
     if (RegQueryValueExW(key, L"roots", nullptr, &type, nullptr, &size) == ERROR_SUCCESS &&
         size >= sizeof(wchar_t) * 2) {
@@ -335,38 +558,82 @@ inline std::vector<std::wstring> managed_get_roots(const std::string& lang) {
                 size_t end = data.find(L'\0', pos);
                 if (end == std::wstring::npos) end = data.size();
                 std::wstring item = data.substr(pos, end - pos);
-                if (!item.empty()) out.push_back(item);
+                if (!item.empty()) old.roots.push_back(item);
                 if (end == data.size() || end + 1 >= data.size()) break;
                 pos = end + 1;
             }
         }
     }
+    {
+        wchar_t buf[MAX_PATH * 2] = {};
+        DWORD sz = sizeof(buf) - sizeof(wchar_t);
+        if (RegQueryValueExW(key, L"last_root", nullptr, &type, (BYTE*)buf, &sz) == ERROR_SUCCESS)
+            old.last_root = buf;
+    }
+    // 其余 REG_SZ 值（如 flutter\mirror）一并迁移
+    for (DWORD i = 0;; ++i) {
+        wchar_t name[128] = {};
+        DWORD nlen = 128, dsz = 1024, vtype = 0;
+        BYTE data[1024] = {};
+        if (RegEnumValueW(key, i, name, &nlen, nullptr, &vtype, data, &dsz) != ERROR_SUCCESS)
+            break;
+        std::wstring nm(name, nlen);
+        if (nm == L"roots" || nm == L"last_root") continue;
+        if (vtype != REG_SZ && vtype != REG_EXPAND_SZ) continue;
+        std::wstring val((const wchar_t*)data, dsz / sizeof(wchar_t));
+        while (!val.empty() && val.back() == L'\0') val.pop_back();
+        old.values.emplace_back(su::wide_to_utf8(nm), std::move(val));
+    }
     RegCloseKey(key);
-    return out;
+
+    if (old.roots.empty() && old.last_root.empty() && old.values.empty()) return false;
+
+    std::string err;
+    if (!managed_save_locked(lang, old, err)) {
+        logx::line("旧注册表记录迁移到 JSON 失败 [" + lang + "]：" + err +
+                   "（保留注册表数据，下次自动重试）");
+        return false;
+    }
+    RegDeleteTreeW(HKEY_CURRENT_USER, managed_key(lang).c_str());
+    logx::linef("旧注册表记录已迁移至 %s（旧注册表键已清理）",
+                su::wide_to_utf8(managed_json_path(lang).wstring()).c_str());
+    r = std::move(old);
+    return true;
+}
+
+// 加载记录（需持锁）：优先 JSON；不存在时尝试旧注册表迁移
+inline bool managed_load_locked(const std::string& lang, ManagedRecord& r) {
+    r = ManagedRecord{};
+    std::string text;
+    if (managed_read_file(managed_json_path(lang), text)) {
+        std::string err;
+        if (managed_from_json(text, r, err)) {
+            if (r.id.empty()) r.id = lang;
+            if (r.language.empty()) r.language = managed_display_name(lang);
+            return true;
+        }
+        logx::line("受管记录文件解析失败 " + su::wide_to_utf8(managed_json_path(lang).wstring()) +
+                   "：" + err);
+        return false; // 视为无记录；不自动覆盖，保留现场便于排查
+    }
+    return managed_migrate_locked(lang, r);
+}
+
+inline std::vector<std::wstring> managed_get_roots(const std::string& lang) {
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    return r.roots;
 }
 
 inline bool managed_set_roots(const std::string& lang, const std::vector<std::wstring>& roots,
                               std::string& err) {
-    HKEY key = nullptr;
-    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
-                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
-    if (rc != ERROR_SUCCESS) {
-        err = "打开注册表 Software\\EnvironManage 失败（错误码 " + std::to_string(rc) + "）";
-        return false;
-    }
-    if (roots.empty()) {
-        RegDeleteValueW(key, L"roots");
-        RegCloseKey(key);
-        return true;
-    }
-    std::wstring data;
-    for (const std::wstring& r : roots) data += r + L"\0";
-    data += L"\0";
-    rc = RegSetValueExW(key, L"roots", 0, REG_MULTI_SZ, (const BYTE*)data.c_str(),
-                        (DWORD)(data.size() * sizeof(wchar_t)));
-    RegCloseKey(key);
-    if (rc != ERROR_SUCCESS) {
-        err = "写入受管目录记录失败（错误码 " + std::to_string(rc) + "）";
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    r.roots = roots;
+    if (!managed_save_locked(lang, r, err)) {
+        err = "写入受管记录文件失败：" + err;
         return false;
     }
     return true;
@@ -375,13 +642,15 @@ inline bool managed_set_roots(const std::string& lang, const std::vector<std::ws
 inline bool managed_add_root(const std::string& lang, const fs::path& root) {
     std::wstring w = root.wstring();
     while (!w.empty() && w.back() == L'\\') w.pop_back();
-    std::vector<std::wstring> roots = managed_get_roots(lang);
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
     std::wstring low = su::lower(w);
-    for (const std::wstring& r : roots)
-        if (su::lower(r) == low) return true;
-    roots.push_back(w);
+    for (const std::wstring& x : r.roots)
+        if (su::lower(x) == low) return true;
+    r.roots.push_back(w);
     std::string err;
-    if (!managed_set_roots(lang, roots, err)) {
+    if (!managed_save_locked(lang, r, err)) {
         logx::line("记录受管目录失败: " + err);
         return false;
     }
@@ -392,14 +661,17 @@ inline bool managed_add_root(const std::string& lang, const fs::path& root) {
 inline bool managed_remove_root(const std::string& lang, const fs::path& root) {
     std::wstring w = root.wstring();
     while (!w.empty() && w.back() == L'\\') w.pop_back();
-    std::vector<std::wstring> roots = managed_get_roots(lang);
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
     std::vector<std::wstring> keep;
     std::wstring low = su::lower(w);
-    for (const std::wstring& r : roots)
-        if (su::lower(r) != low) keep.push_back(r);
-    if (keep.size() == roots.size()) return true;
+    for (const std::wstring& x : r.roots)
+        if (su::lower(x) != low) keep.push_back(x);
+    if (keep.size() == r.roots.size()) return true;
+    r.roots = std::move(keep);
     std::string err;
-    if (!managed_set_roots(lang, keep, err)) {
+    if (!managed_save_locked(lang, r, err)) {
         logx::line("更新受管目录记录失败: " + err);
         return false;
     }
@@ -408,67 +680,58 @@ inline bool managed_remove_root(const std::string& lang, const fs::path& root) {
 }
 
 inline bool managed_set_last_root(const std::string& lang, const fs::path& root) {
-    HKEY key = nullptr;
-    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
-                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
-    if (rc != ERROR_SUCCESS) return false;
     std::wstring w = root.wstring();
     while (!w.empty() && w.back() == L'\\') w.pop_back();
-    rc = RegSetValueExW(key, L"last_root", 0, REG_SZ, (const BYTE*)w.c_str(),
-                        (DWORD)((w.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(key);
-    return rc == ERROR_SUCCESS;
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    r.last_root = w;
+    std::string err;
+    return managed_save_locked(lang, r, err);
 }
 
-// ---- 通用用户偏好（HKCU\Software\EnvironManage\<lang>\<name>，REG_SZ） ----
-// 用于镜像站选择等小配置的持久化（如 flutter\mirror = 镜像下标）
+// ---- 语言级偏好（记录文件 values 节，如 flutter mirror = 镜像下标） ----
+// 空值语义为清除该偏好项
 inline bool managed_set_value(const std::string& lang, const wchar_t* name,
                               const std::wstring& value, std::string& err) {
-    HKEY key = nullptr;
-    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, nullptr,
-                              REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
-    if (rc != ERROR_SUCCESS) {
-        err = "打开注册表 Software\\EnvironManage 失败（错误码 " + std::to_string(rc) + "）";
-        return false;
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    std::string key = su::wide_to_utf8(name);
+    bool found = false;
+    for (auto it = r.values.begin(); it != r.values.end(); ++it) {
+        if (it->first == key) {
+            found = true;
+            if (value.empty())
+                r.values.erase(it);
+            else
+                it->second = value;
+            break;
+        }
     }
-    rc = RegSetValueExW(key, name, 0, REG_SZ, (const BYTE*)value.c_str(),
-                        (DWORD)((value.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(key);
-    if (rc != ERROR_SUCCESS) {
-        err = "写入注册表值失败（错误码 " + std::to_string(rc) + "）";
+    if (!found && !value.empty()) r.values.emplace_back(key, value);
+    if (!managed_save_locked(lang, r, err)) {
+        err = "写入语言偏好失败：" + err;
         return false;
     }
     return true;
 }
 
 inline std::wstring managed_get_value(const std::string& lang, const wchar_t* name) {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
-                      &key) != ERROR_SUCCESS)
-        return {};
-    wchar_t buf[MAX_PATH * 2] = {};
-    DWORD size = sizeof(buf) - sizeof(wchar_t), type = 0;
-    std::wstring out;
-    if (RegQueryValueExW(key, name, nullptr, &type, (BYTE*)buf, &size) == ERROR_SUCCESS &&
-        (type == REG_SZ || type == REG_EXPAND_SZ))
-        out.assign(buf, size / 2);
-    while (!out.empty() && out.back() == L'\0') out.pop_back();
-    RegCloseKey(key);
-    return out;
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    std::string key = su::wide_to_utf8(name);
+    for (const auto& kv : r.values)
+        if (kv.first == key) return kv.second;
+    return {};
 }
 
 inline std::wstring managed_get_last_root(const std::string& lang) {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, managed_key(lang).c_str(), 0, KEY_QUERY_VALUE,
-                      &key) != ERROR_SUCCESS)
-        return {};
-    wchar_t buf[MAX_PATH * 2] = {};
-    DWORD size = sizeof(buf) - sizeof(wchar_t), type = 0;
-    std::wstring out;
-    if (RegQueryValueExW(key, L"last_root", nullptr, &type, (BYTE*)buf, &size) == ERROR_SUCCESS)
-        out = buf;
-    RegCloseKey(key);
-    return out;
+    std::lock_guard<std::mutex> g(managed_mu());
+    ManagedRecord r;
+    managed_load_locked(lang, r);
+    return r.last_root;
 }
 
 // 在当前进程 PATH 中查找可执行文件，返回首个命中的完整路径（未找到返回空）

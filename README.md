@@ -305,7 +305,7 @@ TUI 选择目标或 `--sdk <id>` 进入，九个 SDK 走统一的 Provider 接�
 - **镜像**：Node 走 npmmirror、Go 走阿里云/国内官方、JDK 的 GitHub 直链走 gh-proxy 加速，
   失败自动回退官方源；
 - **Flutter 镜像站（`--sdk flutter`）**：四站可选，确认页 `M` 键循环切换或
-  `--flutter-mirror official|tuna|ustc|cn` 指定，选择自动记忆（注册表），下载失败自动回退其余站：
+  `--flutter-mirror official|tuna|ustc|cn` 指定，选择自动记忆（JSON 记录文件），下载失败自动回退其余站：
 
   | 镜像站 | PUB_HOSTED_URL | FLUTTER_STORAGE_BASE_URL |
   | --- | --- | --- |
@@ -360,6 +360,47 @@ TUI 选择目标或 `--sdk <id>` 进入，九个 SDK 走统一的 Provider 接�
 
 ---
 
+## 语言管理记录（JSON 文件，不写注册表）
+
+语言管理数据**不写入注册表**：每种语言一个 JSON 记录文件，创建于应用所在目录
+（项目文件夹根目录，即 `RustInstall.exe` 同级）：`Environ-Manage-<语言名称>.json`。
+文件名使用与界面一致的语言名称，如：
+
+| 记录文件 | 语言 |
+| --- | --- |
+| `Environ-Manage-Rust.json` | Rust |
+| `Environ-Manage-Python.json` | Python |
+| `Environ-Manage-Node.js.json` | Node.js |
+| `Environ-Manage-JDK (Temurin).json` | JDK |
+| `Environ-Manage-Go.json` / `-.NET.json` / `-Zig.json` / `-PHP.json` / `-Ruby.json` | Go / .NET / Zig / PHP / Ruby |
+| `Environ-Manage-Git For Windows.json` | Git For Windows |
+| `Environ-Manage-Flutter.json` | Flutter |
+
+文件内容（UTF-8，示例）：
+
+```json
+{
+  "app":        "Environ-Manage",
+  "id":         "flutter",
+  "language":   "Flutter",
+  "last_root":  "D:\\DevEnv",
+  "roots":      ["D:\\DevEnv"],
+  "values":     { "mirror": "1" },
+  "updated_at": "2026-10-05 14:30:22"
+}
+```
+
+- `roots`：受本工具管理的安装根目录列表（已装检测 / 卸载 / 设为当前的依据）；
+- `last_root`：该语言最近一次使用的根目录（安装路径屏自动预填）；
+- `values`：语言级偏好，如 Flutter 的下载镜像下标 `mirror`；
+- 记录全空时文件自动删除；写入先落 `.tmp` 再原子替换，进程内互斥，检测线程并发安全；
+  文件损坏时按无记录处理，不自动覆盖（保留现场便于排查）；
+- **旧版迁移**：旧版本写在注册表 `HKCU\Software\EnvironManage` 的记录会在首次读取时
+  自动迁移到对应 JSON（迁移只读注册表），成功后清理对应旧键；此后语言管理完全不再写
+  注册表（用户环境变量 `HKCU\Environment` 的 PATH 等功能性写入不受影响）。
+
+---
+
 ## 完整日志
 
 每次下载/安装过程都会写入日志（默认 **`<exe 目录>\log\RustInstall.log`**，可用 `--log` 指定位置），
@@ -406,7 +447,7 @@ SDK 侧的统一安装流程（`providers/provider.cpp` 的 `install_to_root`）
 | `RustInstall/strutil.hpp` | UTF-8 / 宽字符转换等工具 |
 | `RustInstall/logger.hpp` | 毫秒级时间戳日志 |
 | `RustInstall/console_ui.hpp` | 批处理模式的 UTF-8 / 进度条助手 |
-| `RustInstall/platform/platform.hpp` | 架构探测、三元组、PATH/环境变量写入（HKCU） |
+| `RustInstall/platform/platform.hpp` | 架构探测、三元组、PATH/环境变量写入（HKCU）、语言管理 JSON 记录（`Environ-Manage-<语言>.json`，含旧注册表自动迁移） |
 | `RustInstall/providers/provider.hpp` | **Provider 统一接口**与公共数据结构（UI 只依赖此文件） |
 | `RustInstall/providers/registry.hpp` | Provider 注册表（工厂） |
 | `RustInstall/providers/provider.cpp` | 公共安装流程 `install_to_root`（下载→校验→解压→junction→环境变量→验证） |

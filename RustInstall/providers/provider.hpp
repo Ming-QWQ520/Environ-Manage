@@ -114,7 +114,7 @@ struct ManagedInstall {
 // 扫描单个根目录下的版本子目录（校验 verify_exe 存在），返回（版本名, 版本目录）
 std::vector<std::pair<std::string, fs::path>> scan_root_versions(Provider& p,
                                                                  const fs::path& root);
-// 扫描注册表记录的全部受管根目录（HKCU\Software\EnvironManage\<id>\roots）；
+// 扫描 JSON 受管记录的全部受管根目录（<exe 目录>\Environ-Manage-<语言名称>.json 的 roots 节）；
 // 平铺语言同时返回根目录本体（flat_root=true，版本经 --version 捕获）与历史版本子目录
 std::vector<ManagedInstall> managed_installs(Provider& p);
 // 卸载指定版本：多版本删除版本目录并维护 junction；平铺删除整个根目录；

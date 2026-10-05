@@ -1294,7 +1294,7 @@ static int run_sdk_list(const Options& opts) {
 static int run_sdk_batch(const Options& opts) {
     auto provider = prov::Registry::instance().create(opts.sdk);
     if (!provider) return 1;
-    // Flutter：镜像站选择（--flutter-mirror 覆盖注册表记忆；不传则用上次选择/默认社区镜像）
+    // Flutter：镜像站选择（--flutter-mirror 覆盖 JSON 记录记忆；不传则用上次选择/默认社区镜像）
     if (provider->id() == "flutter" && !opts.flutter_mirror.empty()) {
         int idx = parse_flutter_mirror(opts.flutter_mirror);
         if (idx < 0) {
@@ -1902,7 +1902,7 @@ struct DetectedInst {
 };
 
 // 某语言已装检测（后台线程调用；provider 为空时按 Python 流程）：
-// 受管记录（注册表）+ 外部安装探测（环境变量 / PATH）
+// 受管记录（JSON 文件）+ 外部安装探测（环境变量 / PATH）
 inline std::vector<DetectedInst> detect_lang_installs(const std::string& id,
                                                       prov::Provider* provider) {
     std::vector<DetectedInst> rows;
@@ -2189,7 +2189,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         return sdk_provider ? sdk_provider->multi_version() : true;
     }
 
-    // 后台检测：受管根目录扫描（注册表）+ 外部安装探测（注册表/环境变量/PATH）
+    // 后台检测：受管根目录扫描（JSON 记录）+ 外部安装探测（注册表/环境变量/PATH）
     void begin_inst_detect() {
         if (inst_thread.joinable()) inst_thread.join();
         inst_done = false;
