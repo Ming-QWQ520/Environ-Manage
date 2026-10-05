@@ -120,6 +120,24 @@ inline bool add_path_dir(const fs::path& dir, std::string& err) {
 }
 
 // 隐藏窗口运行进程并等待
+// 启动隐藏进程（异步）：成功返回进程句柄供 WaitForSingleObject 轮询等待，
+// 结束后需 CloseHandle(pi.hProcess) 与 CloseHandle(pi.hThread)；失败返回 nullptr
+inline HANDLE run_hidden_async(const fs::path& exe, const std::wstring& args,
+                               PROCESS_INFORMATION& pi, std::string& err) {
+    std::wstring cmd = L"\"" + exe.wstring() + L"\" " + args;
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    pi = {};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi)) {
+        err = "无法启动 " + su::wide_to_utf8(exe.wstring());
+        return nullptr;
+    }
+    return pi.hProcess;
+}
+
 inline bool run_hidden(const fs::path& exe, const std::wstring& args, DWORD& exit_code,
                        std::string& err) {
     std::wstring cmd = L"\"" + exe.wstring() + L"\" " + args;

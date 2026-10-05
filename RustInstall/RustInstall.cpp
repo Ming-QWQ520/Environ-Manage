@@ -32,6 +32,7 @@
 #include "github.hpp"
 #include "logger.hpp"
 #include "python.hpp"
+#include "providers/archive.hpp"
 #include "providers/registry.hpp"
 #include "providers/node_tools.hpp"
 #include "platform/platform.hpp"
@@ -44,6 +45,66 @@
 #pragma comment(lib, "shell32.lib")
 
 namespace fs = std::filesystem;
+
+// --------------------------------------------------------------- 安装进度钩子
+
+// 工作线程进度钩子守卫：线程退出（含任意失败/取消提前 return）时自动清理全局回调，
+// 避免悬空引用与下一次安装残留旧状态
+struct WorkHookGuard {
+    ~WorkHookGuard() {
+        archive::clear_hook();
+        prov::clear_stage_hook();
+    }
+};
+
+// 解压进度 TUI 回调（捕获 mutable 节流状态，std::function 存储副本内持久）
+// phase: 0=解压中（进度条+速度） 1=合并中（提示） 2=完成（定格终值）
+template <typename Self>
+inline auto make_extract_hook(Self self) {
+    return [self, x_draw = std::chrono::steady_clock::now(),
+            x_bps = 0.0, x_bytes = (uint64_t)0](int phase, uint64_t done, uint64_t total,
+                                                double bps) mutable {
+        if (phase == 1) {
+            std::lock_guard<std::mutex> lk(self->wmu);
+            self->w_note = "整理文件结构…";
+            if (!self->exiting) self->screen.PostEvent(ftxui::Event::Custom);
+            return;
+        }
+        auto now = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now - x_draw).count();
+        if (phase == 0) {
+            if (dt < 0.15 && !(total > 0 && done >= total)) return;
+            double inst = dt > 0 ? (double)(done - x_bytes) / dt : 0;
+            x_bps = x_bps == 0 ? inst : x_bps * 0.7 + inst * 0.3;
+            x_bytes = done;
+            x_draw = now;
+            bps = x_bps;
+        }
+        {
+            std::lock_guard<std::mutex> lk(self->wmu);
+            self->w_done = done;
+            self->w_total = total;
+            if (phase == 2) self->w_note.clear();
+            self->w_bar = ui::progress_line(done, total, bps);
+        }
+        if (!self->exiting) self->screen.PostEvent(ftxui::Event::Custom);
+    };
+}
+
+// 安装管线阶段通知 → 步骤条推进（经 w_stage_step 映射；未映射的阶段忽略）
+template <typename Self>
+inline auto make_stage_hook(Self self) {
+    return [self](int stage) {
+        if (stage < 0 || stage > 5) return;
+        int target = -1;
+        {
+            std::lock_guard<std::mutex> lk(self->wmu);
+            if (stage < (int)self->w_stage_step.size()) target = self->w_stage_step[stage];
+            if (target >= 0) self->w_step = target;
+        }
+        if (target >= 0 && !self->exiting) self->screen.PostEvent(ftxui::Event::Custom);
+    };
+}
 
 // --------------------------------------------------------------- 杂项
 
@@ -555,6 +616,7 @@ static bool download_and_install(const Options& opts, const dist::Artifact& art,
     out.ok = true;
 
     // SHA-256 校验
+    prov::stage_notify(1);
     std::string expect = art.sha256;
     if (expect.empty()) expect = dist::fetch_sidecar_sha256(art.rel_path, used_mirror);
     if (!expect.empty()) {
@@ -575,6 +637,7 @@ static bool download_and_install(const Options& opts, const dist::Artifact& art,
 // tar.gz 解压安装并验证 rustc/cargo；结果写入 out
 static bool install_and_verify(const Options& opts, const fs::path& dir, const std::string& pkg,
                                InstallOutcome& out, std::string& err) {
+    prov::stage_notify(2); // 解压
     if (!dist::install_tar_gz(out.dest, dir, err)) return false;
     out.rustc_v = dist::run_capture_first_line(dir / L"bin" / L"rustc.exe", L"--version");
     out.cargo_v = dist::run_capture_first_line(dir / L"bin" / L"cargo.exe", L"--version");
@@ -821,8 +884,20 @@ static int run_batch(const Options& opts) {
     }
 
     printf("正在解压安装到 %s …\n", su::wide_to_utf8(dir.wstring()).c_str());
-    if (!install_and_verify(opts, dir, pkg, outcome, err)) {
-        printf("%s安装失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+    // 解压可视化：\r 进度行（总进度 + 速度），完成打印汇总行
+    ::archive::set_hook([](int phase, uint64_t done, uint64_t total, double bps) {
+        if (phase == 0) {
+            ui::progress(done, total, bps);
+        } else if (phase == 2) {
+            printf("\r  %s[解压完成]%s %s  平均 %s/s    \n", ui::kGreen, ui::kReset,
+                   su::human_size(done).c_str(),
+                   su::human_size((uint64_t)bps).c_str());
+        }
+    });
+    bool rust_installed = install_and_verify(opts, dir, pkg, outcome, err);
+    ::archive::clear_hook();
+    if (!rust_installed) {
+        printf("\n%s安装失败：%s%s\n", ui::kRed, err.c_str(), ui::kReset);
         return 1;
     }
     printf("%s√ 解压安装完成%s\n\n", ui::kGreen, ui::kReset);
@@ -1034,8 +1109,20 @@ static int run_py_batch(const Options& opts) {
             printf("%s%s%s\n", ui::kGreen, vout.c_str(), ui::kReset);
     } else if (opts.py_install && su::ends_with(l, ".zip")) {
         printf("正在解压到 %s …\n", su::wide_to_utf8(ver_dir.wstring()).c_str());
-        if (!py::extract_zip(dest, ver_dir, err)) {
-            printf("%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
+        // 解压可视化：\r 进度行（总进度 + 速度），完成打印汇总行
+        ::archive::set_hook([](int phase, uint64_t done, uint64_t total, double bps) {
+            if (phase == 0) {
+                ui::progress(done, total, bps);
+            } else if (phase == 2) {
+                printf("\r  %s[解压完成]%s %s  平均 %s/s    \n", ui::kGreen, ui::kReset,
+                       su::human_size(done).c_str(),
+                       su::human_size((uint64_t)bps).c_str());
+            }
+        });
+        bool py_extracted = py::extract_zip(dest, ver_dir, err);
+        ::archive::clear_hook();
+        if (!py_extracted) {
+            printf("\n%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
             return 1;
         }
         std::string vout;
@@ -1218,8 +1305,21 @@ static int run_sdk_batch(const Options& opts) {
             ui::progress(done, total, bps);
         }
     };
-    if (!prov::install_to_root(*provider, f, root, !opts.no_path, false, true,
-                               progress_fn, nullptr, verify_line, err)) {
+    // 解压可视化：下载进度行之后接解压进度行（总进度 + 速度），完成打印汇总行
+    ::archive::set_hook([](int phase, uint64_t done, uint64_t total, double bps) {
+        if (phase == 0) {
+            ui::progress(done, total, bps);
+        } else if (phase == 2) {
+            printf("\r  %s[解压完成]%s %s  平均 %s/s    \n", ui::kGreen, ui::kReset,
+                   su::human_size(done).c_str(),
+                   su::human_size((uint64_t)bps).c_str());
+        }
+    });
+    bool sdk_installed = prov::install_to_root(*provider, f, root, !opts.no_path, false, true,
+                                               progress_fn, nullptr, verify_line, err);
+    ::archive::clear_hook();
+    if (!sdk_installed) {
+        printf("\n");
         ui::progress_done(f.size, false);
         printf("%s%s%s\n", ui::kRed, err.c_str(), ui::kReset);
         return 1;
@@ -2427,6 +2527,12 @@ struct AppState : std::enable_shared_from_this<AppState> {
     InstallOutcome w_outcome;
     int w_kind = 0; // 0=下载 1=本地修复
 
+    // 步骤条（安装管线可视化）：w_steps 名称序列；w_stage_step 阶段→步骤下标映射
+    // （阶段 0=下载 1=校验 2=解压 3=合并 4=配置 5=完成；-1 表示该阶段不映射）
+    std::vector<std::string> w_steps;
+    std::vector<int> w_stage_step;
+    std::atomic<int> w_step{-1};
+
     // 速度统计（仅工作线程访问）
     double w_bps = 0;
     uint64_t w_last_bytes = 0;
@@ -3004,6 +3110,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             else if (cb_install) w_note = "下载后将自动安装/解压到目标目录";
         }
         w_kind = 2;
+        set_work_steps({"下载", "校验", "安装", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
         int mh = py::parse_mirror_name(s.opt.mirror_raw);
         auto self = shared_from_this();
         py::PyFile f = py_file;
@@ -3033,6 +3140,9 @@ struct AppState : std::enable_shared_from_this<AppState> {
         auto cancelled = [self] { return self->w_cancel.load(); };
         w_thread = std::thread([self, f, dir, ver_dir, py_current, archive, repair, do_install,
                                 mh, prog, cancelled] {
+            WorkHookGuard hook_guard;
+            (void)hook_guard;
+            ::archive::set_hook(make_extract_hook(self));
             std::error_code ec;
             InstallOutcome out;
             fs::path dest = archive;
@@ -3051,6 +3161,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             }
             {
                 std::lock_guard<std::mutex> lk(self->wmu);
+                self->w_step = 1;
                 self->w_note = "校验完整性…";
             }
             if (!self->exiting) self->screen.PostEvent(Event::Custom);
@@ -3066,6 +3177,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             if (do_install && su::ends_with(l, ".exe")) {
                 {
                     std::lock_guard<std::mutex> lk(self->wmu);
+                    self->w_step = 2;
                     self->w_note = "正在静默安装（per-user，TargetDir=" +
                                    su::wide_to_utf8(ver_dir.wstring()) + "）…";
                 }
@@ -3083,6 +3195,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             } else if (do_install && su::ends_with(l, ".zip")) {
                 {
                     std::lock_guard<std::mutex> lk(self->wmu);
+                    self->w_step = 2;
                     self->w_note = "正在解压…";
                 }
                 if (!self->exiting) self->screen.PostEvent(Event::Custom);
@@ -3102,6 +3215,12 @@ struct AppState : std::enable_shared_from_this<AppState> {
             }
             // 多版本布局：python/current junction + PATH（current 与 Scripts）
             if (do_install || fs::exists(ver_dir / L"python.exe", ec)) {
+                {
+                    std::lock_guard<std::mutex> lk(self->wmu);
+                    self->w_step = 3;
+                    self->w_note = "正在配置（current junction / PATH）…";
+                }
+                if (!self->exiting) self->screen.PostEvent(Event::Custom);
                 if (!platform::make_junction(py_current, ver_dir, err)) {
                     std::lock_guard<std::mutex> lk(self->wmu);
                     self->w_phase = 2;
@@ -3221,6 +3340,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
         if (!sdk_provider) return;
         reset_work("正在下载 " + sdk_provider->display() + " " + sdk_file.version);
         w_kind = 3;
+        set_work_steps({"下载", "校验", "解压", "配置", "完成"}, {0, 1, 2, 2, 3, 4});
         auto self = shared_from_this();
         prov::Artifact f = sdk_file;
         fs::path root = s.dir;
@@ -3254,6 +3374,10 @@ struct AppState : std::enable_shared_from_this<AppState> {
                 : resolve_dir(su::utf8_to_wide(pnpm_base));
         w_thread = std::thread([self, f, root, add_path, prog, cancelled, is_node, want_pnpm,
                                 want_yarn, corepack_on, storage] {
+            WorkHookGuard hook_guard;
+            (void)hook_guard;
+            ::archive::set_hook(make_extract_hook(self));
+            prov::set_stage_hook(make_stage_hook(self));
             std::string err, vline;
             if (!prov::install_to_root(*self->sdk_provider, f, root, add_path, false, true,
                                        prog, cancelled, vline, err)) {
@@ -3340,6 +3464,17 @@ struct AppState : std::enable_shared_from_this<AppState> {
         w_bps = 0;
         w_last_bytes = 0;
         w_last_draw = std::chrono::steady_clock::now();
+        w_steps.clear();
+        w_stage_step.clear();
+        w_step = -1;
+    }
+
+    // 设置步骤条与阶段映射；流程自第一步开始
+    void set_work_steps(std::vector<std::string> steps, std::vector<int> stage_step) {
+        std::lock_guard<std::mutex> lk(wmu);
+        w_steps = std::move(steps);
+        w_stage_step = std::move(stage_step);
+        w_step = w_steps.empty() ? -1 : 0;
     }
 
     void start_download() {
@@ -3360,6 +3495,7 @@ struct AppState : std::enable_shared_from_this<AppState> {
             if (s.repair) w_note = "修复模式：优先使用已下载的安装包";
         }
         w_kind = 0;
+        set_work_steps({"下载", "校验", "解压", "完成"}, {0, 1, 2, 2, 2, 3});
 
         auto self = shared_from_this();
         auto prog = [self](uint64_t done, uint64_t total) {
@@ -3384,6 +3520,10 @@ struct AppState : std::enable_shared_from_this<AppState> {
         dist::Artifact artc = art;
         fs::path dir = s.dir;
         w_thread = std::thread([self, artc, dir, prog, cancelled] {
+            WorkHookGuard hook_guard;
+            (void)hook_guard;
+            ::archive::set_hook(make_extract_hook(self));
+            prov::set_stage_hook(make_stage_hook(self));
             InstallOutcome out;
             std::string err;
             int used = -1;
@@ -3437,10 +3577,15 @@ struct AppState : std::enable_shared_from_this<AppState> {
             w_note = "正在解压覆盖…";
         }
         w_kind = 1;
+        set_work_steps({"解压", "完成"}, {0, 0, 0, 0, 0, 1});
         fs::path archive = s.local_archive;
         fs::path dir = s.dir;
         auto self = shared_from_this();
         w_thread = std::thread([self, archive, dir] {
+            WorkHookGuard hook_guard;
+            (void)hook_guard;
+            ::archive::set_hook(make_extract_hook(self));
+            prov::set_stage_hook(make_stage_hook(self));
             InstallOutcome out;
             out.dest = archive;
             std::string err;
@@ -3857,6 +4002,23 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         Elements v;
         v.push_back(text(st->w_file.empty() ? "…" : st->w_file) | bold);
         v.push_back(text(""));
+        // 步骤条：√ 已完成（绿）· ▶ 当前（青·加粗）· 待办（灰）；成功时全部置 √
+        if (!st->w_steps.empty()) {
+            int cur = st->w_step.load();
+            if (st->w_phase == 1) cur = (int)st->w_steps.size();
+            Elements strip;
+            for (size_t i = 0; i < st->w_steps.size(); ++i) {
+                if ((int)i < cur)
+                    strip.push_back(text("√ " + st->w_steps[i]) | color(Color::Green));
+                else if ((int)i == cur)
+                    strip.push_back(text("▶ " + st->w_steps[i]) | bold | color(Color::Cyan));
+                else
+                    strip.push_back(text(st->w_steps[i]) | dim);
+                if (i + 1 < st->w_steps.size()) strip.push_back(text(" · ") | dim);
+            }
+            v.push_back(hbox(std::move(strip)));
+            v.push_back(text(""));
+        }
         if (st->w_total > 0) {
             v.push_back(gauge((float)((double)st->w_done.load() / (double)st->w_total.load())) |
                         color(Color::Cyan));
@@ -3867,7 +4029,7 @@ static Component build_app(std::shared_ptr<Session> sp_s, ScreenInteractive& scr
         if (!st->w_note.empty()) v.push_back(text(st->w_note) | dim);
         v.push_back(text(""));
         if (st->w_phase == 0) {
-            v.push_back(text("Esc 取消（保留断点，支持续传）") | dim);
+            v.push_back(text("Esc 取消下载（保留断点，支持续传；解压阶段需等待完成）") | dim);
         } else if (st->w_phase == 1) {
             v.push_back(text("√ 完成！回车继续") | color(Color::Green) | bold);
         } else {

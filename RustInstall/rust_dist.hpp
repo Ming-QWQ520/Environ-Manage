@@ -13,6 +13,7 @@
 
 #include "http.hpp"
 #include "logger.hpp"
+#include "providers/archive.hpp"
 #include "sha256.hpp"
 #include "strutil.hpp"
 #include "toml_lite.hpp"
@@ -482,13 +483,6 @@ inline bool install_component_dir(const fs::path& comp, const fs::path& install_
 
 // 解压 tar.gz 并合并到安装目录，返回 bin 目录是否存在
 inline bool install_tar_gz(const fs::path& archive, const fs::path& install_dir, std::string& err) {
-    wchar_t tar_exe[MAX_PATH * 2] = {};
-    ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\tar.exe", tar_exe, MAX_PATH * 2);
-    if (GetFileAttributesW(tar_exe) == INVALID_FILE_ATTRIBUTES) {
-        err = "未找到 Windows 自带的 tar.exe（需要 Windows 10 1803+）";
-        return false;
-    }
-
     std::error_code ec;
     fs::path tmp = install_dir / L"_rust_extract_tmp";
     fs::remove_all(tmp, ec);
@@ -500,11 +494,7 @@ inline bool install_tar_gz(const fs::path& archive, const fs::path& install_dir,
 
     logx::linef("解压开始: %s → %s", su::wide_to_utf8(archive.wstring()).c_str(),
                 su::wide_to_utf8(install_dir.wstring()).c_str());
-    std::wstring args = L"-xzf \"" + archive.wstring() + L"\" -C \"" + tmp.wstring() + L"\"";
-    DWORD code = 0;
-    if (!run_hidden(tar_exe, args, code, err) || code != 0) {
-        if (err.empty()) err = "解压失败（tar 退出码 " + std::to_string(code) + "，压缩包可能损坏）";
-        logx::line("解压失败: " + err);
+    if (!archive::extract_to_dir_with_progress(archive, tmp, L"-xzf", err)) {
         fs::remove_all(tmp, ec);
         return false;
     }

@@ -84,6 +84,14 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
                      const std::function<bool()>& cancelled, std::string& verify_line,
                      std::string& err);
 
+// ---- 安装管线阶段通知（供 TUI 步骤条 / 批处理提示） ----
+// 阶段常量：0=下载 1=校验 2=解压 3=合并 4=配置 5=完成
+// 由 install_to_root 在进入各阶段时触发；UI 经 set_stage_hook 接收
+using StageHook = std::function<void(int)>;
+void set_stage_hook(StageHook cb);
+void clear_stage_hook();
+void stage_notify(int stage);
+
 // ---- 已装扫描与卸载 ----
 // 一条受管安装记录：多版本语言为版本子目录；平铺语言 flat_root=true（dir 即安装根目录）
 struct ManagedInstall {

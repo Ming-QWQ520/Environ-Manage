@@ -22,6 +22,7 @@
 #include "json.hpp"
 #include "logger.hpp"
 #include "md5.hpp"
+#include "providers/archive.hpp"
 #include "rust_dist.hpp" // dist::run_hidden
 #include "sha256.hpp"
 #include "strutil.hpp"
@@ -580,20 +581,9 @@ inline bool install_exe(const fs::path& installer, const fs::path& target_dir, b
     return true;
 }
 
-// zip 解压（Windows 自带 bsdtar 支持 zip）
+// zip 解压（经公共解压层：tar.exe 异步 + 轮询进度回调）
 inline bool extract_zip(const fs::path& zip, const fs::path& target_dir, std::string& err) {
-    wchar_t tar_exe[MAX_PATH * 2] = {};
-    ExpandEnvironmentStringsW(L"%SystemRoot%\\System32\\tar.exe", tar_exe, MAX_PATH * 2);
-    if (GetFileAttributesW(tar_exe) == INVALID_FILE_ATTRIBUTES) {
-        err = "未找到 Windows 自带的 tar.exe";
-        return false;
-    }
-    std::error_code ec;
-    fs::create_directories(target_dir, ec);
-    std::wstring args = L"-xf \"" + zip.wstring() + L"\" -C \"" + target_dir.wstring() + L"\"";
-    DWORD code = 0;
-    if (!dist::run_hidden(tar_exe, args, code, err) || code != 0) {
-        if (err.empty()) err = "解压失败（tar 退出码 " + std::to_string(code) + "）";
+    if (!archive::extract_to_dir_with_progress(zip, target_dir, L"-xf", err)) {
         logx::line("zip 解压失败: " + err);
         return false;
     }

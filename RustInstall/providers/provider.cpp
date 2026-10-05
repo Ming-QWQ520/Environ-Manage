@@ -38,6 +38,19 @@ std::string flat_capture_version(Provider& p, const fs::path& root) {
 
 } // namespace
 
+namespace {
+
+// 安装管线阶段回调（进程内单安装流）
+StageHook g_stage_hook;
+
+} // namespace
+
+void set_stage_hook(StageHook cb) { g_stage_hook = std::move(cb); }
+void clear_stage_hook() { g_stage_hook = nullptr; }
+void stage_notify(int stage) {
+    if (g_stage_hook) g_stage_hook(stage);
+}
+
 bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool add_path,
                      bool repair, bool switch_current,
                      const std::function<void(uint64_t, uint64_t)>& progress,
@@ -57,14 +70,18 @@ bool install_to_root(Provider& p, const Artifact& a, const fs::path& root, bool 
 
     int used = -1;
     if (!(repair && fs::exists(dest, ec0))) {
+        stage_notify(0); // 下载
         if (!httpc::download_mirrors(p.mirrors(a), dest, progress, used, err, cancelled))
             return false;
     }
     logx::linef("下载源: %s", p.mirrors(a)[(size_t)used].first.c_str());
+    stage_notify(1); // 校验
     if (!p.verify(a, dest, err)) return false;
+    stage_notify(2); // 解压
     if (!p.install(a, dest, ver_dir, err)) return false;
 
     // current junction（仅多版本语言：<root>\current → <root>\<版本>；平铺无 junction）
+    stage_notify(4); // 配置（junction / PATH / 环境变量）
     fs::path base = multi ? root / L"current" : root;
     if (multi && switch_current)
         if (!platform::make_junction(base, ver_dir, err)) return false;
